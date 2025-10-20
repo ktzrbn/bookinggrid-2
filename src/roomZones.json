@@ -1,0 +1,4 @@
+{
+  "# Example mapping": "Add mappings from room eid to zone here, e.g. \"211617\": \"Lower Level\"",
+  "# Note": "This file is optional. If empty, the app will attempt to infer zones from room names and fall back to category."
+}
