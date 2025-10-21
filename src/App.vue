@@ -82,6 +82,32 @@ const token = import.meta.env.VITE_LIBCAL_TOKEN
 const locationId = import.meta.env.VITE_LOCATION_ID
 const roomItemIds = import.meta.env.VITE_ROOM_ITEM_IDS ? import.meta.env.VITE_ROOM_ITEM_IDS.split(',').map(id => Number(id.trim())) : []
 
+// Simple in-memory cache for fetched item metadata to avoid refetching the same ids
+const itemCache = {}
+
+// Helpers to normalize booking and room shapes and to dedupe bookings
+const normalizeBooking = (b) => {
+  if (!b) return b
+  const fromDate = b.fromDate || b.from || b.start || b.startDate || b.start_time || b.startTime
+  const toDate = b.toDate || b.to || b.end || b.endDate || b.end_time || b.endTime
+  const eid = (b.eid !== undefined && b.eid !== null) ? Number(b.eid) : (b.item_id !== undefined && b.item_id !== null ? Number(b.item_id) : undefined)
+  const id = (b.id !== undefined && b.id !== null) ? Number(b.id) : undefined
+  const status = (b.status !== undefined && b.status !== null) ? String(b.status) : undefined
+  return { ...b, eid, id, status, fromDate, toDate }
+}
+
+const dedupeBookings = (arr) => {
+  const seen = new Set()
+  const out = []
+  for (const b of (arr || [])) {
+    const key = `${b.eid}|${b.fromDate}|${b.toDate}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(b)
+  }
+  return out
+}
+
 const rooms = ref([])
 const bookings = ref([])
 const loading = ref(true)
@@ -155,11 +181,13 @@ const fetchBookings = async () => {
     }
     const data = await response.json()
     console.log('Data length', data.length)
-    const confirmedBookings = data.filter(booking => booking.status === 'Confirmed')
-    bookings.value = confirmedBookings
+  const confirmedBookings = data.filter(booking => booking.status === 'Confirmed')
+  // Normalize and dedupe bookings immediately
+  const normalized = confirmedBookings.map(normalizeBooking)
+  bookings.value = dedupeBookings(normalized)
 
-    // Build rooms list from bookings plus env IDs, then enrich with item details
-    const ids = buildRoomsFromBookings(confirmedBookings)
+  // Build rooms list from normalized bookings plus env IDs, then enrich with item details
+  const ids = buildRoomsFromBookings(bookings.value)
     try {
       await enrichRoomsWithAPIData(ids)
     } catch (e) {
@@ -171,8 +199,17 @@ const fetchBookings = async () => {
       const avail = await fetchAvailabilityForIds(ids, dateStr)
       for (const seg of avail) {
         const segEid = Number(seg.eid)
-        const exists = bookings.value.some(b => Number(b.eid) === segEid && b.fromDate === seg.fromDate && b.toDate === seg.toDate)
-        if (!exists) bookings.value.push({ ...seg, eid: segEid })
+        const normSeg = normalizeBooking({ ...seg, eid: segEid, status: seg.status || 'Confirmed' })
+        const exists = bookings.value.some(b => b.eid === normSeg.eid && b.fromDate === normSeg.fromDate && b.toDate === normSeg.toDate)
+        if (!exists) bookings.value.push(normSeg)
+      }
+      // Normalize and dedupe after merging availability
+      bookings.value = dedupeBookings(bookings.value.map(normalizeBooking))
+      // Re-run enrichment to pick up any metadata for ids added via availability
+      try {
+        await enrichRoomsWithAPIData(ids)
+      } catch (e) {
+        console.warn('Failed to re-enrich rooms after availability merge:', e)
       }
     } catch (e) {
       // ignore availability merge errors
@@ -190,47 +227,92 @@ const getBookingsForRoom = (roomId) => {
 
 const fetchItemDetails = async (ids) => {
   const map = {}
-  await Promise.all(ids.map(async (id) => {
-    try {
-      const res = await fetch(`${baseUrl}/space/items/${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
-      console.log(`fetchItemDetails: id=${id} status=${res.status}`)
-      if (!res.ok) return
-      const data = await res.json()
-      const obj = Array.isArray(data) ? data[0] : data
-      console.log('fetchItemDetails: got', id, obj)
-      map[id] = obj
-    } catch (e) {
-      // ignore individual failures
+  // populate from cache first
+  for (const id of ids) {
+    if (itemCache[id]) map[id] = itemCache[id]
+  }
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+  // Throttle: run sequential requests with a small delay to avoid hitting API rate limits
+  const delayMs = 150 // ~6-7 requests per second (well below 25 req/s)
+  for (const id of ids) {
+    // skip if we already have it from cache or a previous fetch
+    if (map[id]) continue
+    let attempts = 0
+    const maxAttempts = 3
+    let ok = false
+    while (!ok && attempts < maxAttempts) {
+      attempts += 1
+      try {
+        const res = await fetch(`${baseUrl}/space/items/${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
+        console.log(`fetchItemDetails: id=${id} attempt=${attempts} status=${res.status}`)
+        if (res.ok) {
+          const data = await res.json()
+          const obj = Array.isArray(data) ? data[0] : data
+          if (obj) {
+            map[id] = obj
+            itemCache[id] = obj
+          }
+          ok = true
+          break
+        } else if (res.status >= 500) {
+          // server error - retry
+          await sleep(delayMs * attempts)
+        } else {
+          // client error or not found - don't retry
+          ok = true
+          break
+        }
+      } catch (e) {
+        console.warn(`fetchItemDetails error id=${id} attempt=${attempts}`, e)
+        await sleep(delayMs * attempts)
+      }
     }
-  }))
+    // small pause between requests even on success
+    await sleep(delayMs)
+  }
   return map
 }
 
 const fetchAvailabilityForIds = async (ids, dateStr) => {
   const availBookings = []
-  await Promise.all(ids.map(async (id) => {
-    try {
-      const res = await fetch(`${baseUrl}/space/availability?lid=${locationId}&date=${dateStr}&eid=${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
-      console.log(`fetchAvailabilityForIds: id=${id} status=${res.status}`)
-      if (!res.ok) return
-      const data = await res.json()
-      const arr = Array.isArray(data) ? data : (data.availability || data.items || [])
-      console.log(`fetchAvailabilityForIds: id=${id} found ${Array.isArray(arr) ? arr.length : 0} segments`)
-      if (!Array.isArray(arr)) return
-      for (const seg of arr) {
-        // determine if segment indicates a booked/unavailable period
-        const status = (seg.status || '').toString().toLowerCase()
-        const bookedCandidate = seg.bookId || seg.id || seg.booked || (status && (status.includes('book') || status.includes('unavail') || status.includes('busy') || seg.available === false))
-        if (!bookedCandidate) continue
-        const from = seg.fromDate || seg.from || seg.start || seg.startDate || seg.start_time || seg.startTime
-        const to = seg.toDate || seg.to || seg.end || seg.endDate || seg.end_time || seg.endTime
-        if (!from || !to) continue
-  availBookings.push({ id: `${id}-${from}-${to}`, eid: Number(id), fromDate: from, toDate: to, status: 'Confirmed', source: 'availability' })
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+  const delayMs = 150
+  for (const id of ids) {
+    let attempts = 0
+    const maxAttempts = 3
+    let ok = false
+    while (!ok && attempts < maxAttempts) {
+      attempts += 1
+      try {
+        const res = await fetch(`${baseUrl}/space/availability?lid=${locationId}&date=${dateStr}&eid=${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
+        console.log(`fetchAvailabilityForIds: id=${id} attempt=${attempts} status=${res.status}`)
+        if (!res.ok) {
+          if (res.status >= 500) {
+            await sleep(delayMs * attempts)
+            continue
+          }
+          break
+        }
+        const data = await res.json()
+        const arr = Array.isArray(data) ? data : (data.availability || data.items || [])
+        if (!Array.isArray(arr)) { ok = true; break }
+        for (const seg of arr) {
+          const status = (seg.status || '').toString().toLowerCase()
+          const bookedCandidate = seg.bookId || seg.id || seg.booked || (status && (status.includes('book') || status.includes('unavail') || status.includes('busy') || seg.available === false))
+          if (!bookedCandidate) continue
+          const from = seg.fromDate || seg.from || seg.start || seg.startDate || seg.start_time || seg.startTime
+          const to = seg.toDate || seg.to || seg.end || seg.endDate || seg.end_time || seg.endTime
+          if (!from || !to) continue
+          availBookings.push({ id: `${id}-${from}-${to}`, eid: Number(id), fromDate: from, toDate: to, status: 'Confirmed', source: 'availability' })
+        }
+        ok = true
+      } catch (e) {
+        console.warn(`fetchAvailabilityForIds error id=${id} attempt=${attempts}`, e)
+        await sleep(delayMs * attempts)
       }
-    } catch (e) {
-      // ignore
     }
-  }))
+    await sleep(delayMs)
+  }
   return availBookings
 }
 
@@ -269,7 +351,10 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
           const id = item.id || item.eid || item.iid || item.item_id || item.space_id
           if (!id) continue
           const numericId = Number(id)
-          if (idSet.has(numericId) && !itemMap[numericId]) itemMap[numericId] = item
+          if (idSet.has(numericId) && !itemMap[numericId]) {
+            itemMap[numericId] = item
+            itemCache[numericId] = item
+          }
         }
         // refresh missing
         const stillMissing = ids.filter(id => !itemMap[id])
@@ -288,11 +373,11 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
     let name = (item && (item.name || item.item_name)) || (booking && booking.item_name) || `Room ${numId}`
     if (!name || String(name).trim() === '') name = `Room ${numId}`
     const zone = (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || inferZoneFromName(name)
-    const capacity = (item && Number(item.capacity) ? Number(item.capacity) : (roomMeta && Number(roomMeta[numId])) || null)
-    return { id: numId, name, zone, capacity }
+      const capacity = (item && item.capacity != null) ? Number(item.capacity) : (roomMeta && roomMeta[numId] != null ? Number(roomMeta[numId]) : null)
+      return { id: numId, name, zone, capacity }
   })
-
-  rooms.value = newRooms
+    // Ensure ids and capacities are normalized to numbers
+    rooms.value = newRooms.map(r => ({ ...r, id: Number(r.id), capacity: r.capacity != null ? Number(r.capacity) : null }))
   console.log('Room metadata updated from API/items endpoint; items fetched:', Object.keys(itemMap).length)
 }
 
