@@ -56,13 +56,25 @@
               {{ ((i + 7) % 12 || 12) }} {{ i + 7 >= 12 ? 'PM' : 'AM' }}
             </div>
           </template>
-          <div
-            v-for="booking in getBookingsForRoom(room.id)"
-            :key="booking.id"
-            class="booking-segment"
-            :style="getBookingStyle(booking)"
-            :title="formatTime(booking.fromDate) + ' - ' + formatTime(booking.toDate)"
-          ></div>
+          <!-- Render availability segments from item API if present, else fallback to bookings -->
+          <template v-if="room.availability && Array.isArray(room.availability)">
+            <template v-for="(segment, idx) in getTimelineSegments(room.availability)" :key="idx">
+              <div
+                class="booking-segment"
+                :style="getBookingStyle(segment)"
+                :title="formatTime(segment.from) + ' - ' + formatTime(segment.to)"
+              ></div>
+            </template>
+          </template>
+          <template v-else>
+            <div
+              v-for="booking in getBookingsForRoom(room.id)"
+              :key="booking.id"
+              class="booking-segment"
+              :style="getBookingStyle(booking)"
+              :title="formatTime(booking.fromDate) + ' - ' + formatTime(booking.toDate)"
+            ></div>
+          </template>
         </div>
       </div>
     </div>
@@ -73,8 +85,53 @@
 
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
-import roomZones from './roomZones.json'
 import roomMeta from './roomMeta.json'
+import roomZones from './roomZones.json'
+// Given API availability segments, return a full timeline sequence covering open hours, with red for unavailable and green for available
+function getTimelineSegments(availability) {
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  // Convert to minutes
+  const segments = []
+  let cursor = openStart
+  // Sort by start time
+  const sorted = [...availability].sort((a, b) => {
+    const aStart = parseTime(a.from)
+    const bStart = parseTime(b.from)
+    return aStart - bStart
+  })
+  for (const seg of sorted) {
+    const segStart = parseTime(seg.from)
+    const segEnd = parseTime(seg.to)
+    // If there's a gap before this segment, add a green segment
+    if (segStart > cursor) {
+      segments.push({ from: minutesToTime(cursor), to: minutesToTime(segStart), isApiAvailability: false })
+    }
+    // Add the red segment for unavailable
+    segments.push({ from: minutesToTime(segStart), to: minutesToTime(segEnd), isApiAvailability: true })
+    cursor = Math.max(cursor, segEnd)
+  }
+  // If there's time after the last segment, add a green segment
+  if (cursor < openEnd) {
+    segments.push({ from: minutesToTime(cursor), to: minutesToTime(openEnd), isApiAvailability: false })
+  }
+  return segments
+}
+
+function parseTime(str) {
+  if (!str) return 0
+  const d = new Date(str)
+  return d.getHours() * 60 + d.getMinutes()
+}
+
+function minutesToTime(mins) {
+  // Returns ISO string for today at mins
+  const date = new Date(currentDate.value)
+  date.setHours(Math.floor(mins / 60), mins % 60, 0, 0)
+  return date.toISOString()
+}
+
+// Make getTimelineSegments available to template
+defineExpose({ getTimelineSegments })
 
 const libraryName = import.meta.env.VITE_LIBRARY_NAME
 const baseUrl = import.meta.env.VITE_LIBCAL_BASE_URL
@@ -265,20 +322,19 @@ const getBookingsForRoom = (roomId) => {
   return bookings.value.filter(booking => Number(booking.eid) === rid && String(booking.status).toLowerCase() === 'confirmed')
 }
 
-const fetchItemDetails = async (ids) => {
+const fetchItemDetailsWithAvailability = async (ids, dateStr) => {
   const map = {}
-  // sanitize ids to numeric positives and populate from cache first
   const sanitized = (ids || []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
   const invalid = (ids || []).filter(id => !sanitized.includes(Number(id)))
-  if (invalid.length) console.warn('fetchItemDetails: skipping invalid ids', invalid)
+  if (invalid.length) console.warn('fetchItemDetailsWithAvailability: skipping invalid ids', invalid)
   for (const id of sanitized) {
-    if (itemCache[id]) map[id] = itemCache[id]
+    if (itemCache[id] && itemCache[id].availabilityDate === dateStr) {
+      map[id] = itemCache[id]
+    }
   }
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-  // Throttle: run sequential requests with a small delay to avoid hitting API rate limits
-  const delayMs = 150 // ~6-7 requests per second (well below 25 req/s)
+  const delayMs = 150
   for (const id of sanitized) {
-    // skip if we already have it from cache or a previous fetch
     if (map[id]) continue
     let attempts = 0
     const maxAttempts = 3
@@ -286,98 +342,50 @@ const fetchItemDetails = async (ids) => {
     while (!ok && attempts < maxAttempts) {
       attempts += 1
       try {
-  const itemUrl = `${baseUrl}/space/item/${id}`
-  console.log('API Request:', itemUrl)
-  const res = await apiFetch(itemUrl, { headers: { 'Authorization': `Bearer ${token}` } })
-        console.log(`fetchItemDetails: id=${id} attempt=${attempts} status=${res.status}`)
+        // For today, use ?availability (no value); for other dates, use ?availability=YYYY-MM-DD
+        let itemUrl
+        const todayStr = new Date().toISOString().split('T')[0]
+        if (dateStr === todayStr) {
+          itemUrl = `${baseUrl}/space/item/${id}?availability`
+        } else {
+          itemUrl = `${baseUrl}/space/item/${id}?availability=${dateStr}`
+        }
+        console.log('API Request:', itemUrl)
+        const res = await apiFetch(itemUrl, { headers: { 'Authorization': `Bearer ${token}` } })
+        console.log(`fetchItemDetailsWithAvailability: id=${id} attempt=${attempts} status=${res.status}`)
         if (res.ok) {
           const data = await res.json()
+          // If response is array, take first; else use object
           const obj = Array.isArray(data) ? data[0] : data
           if (obj) {
+            obj.availabilityDate = dateStr
             map[id] = obj
             itemCache[id] = obj
           }
           ok = true
           break
         } else if (res.status >= 500) {
-          // server error - retry
           await sleep(delayMs * attempts)
         } else {
-          // client error or not found - don't retry, but log body for debugging
           try {
             const txt = await res.text()
-            console.warn(`fetchItemDetails: id=${id} client error ${res.status}: ${txt}`)
+            console.warn(`fetchItemDetailsWithAvailability: id=${id} client error ${res.status}: ${txt}`)
           } catch (e) {
-            console.warn(`fetchItemDetails: id=${id} client error ${res.status}`)
+            console.warn(`fetchItemDetailsWithAvailability: id=${id} client error ${res.status}`)
           }
           ok = true
           break
         }
       } catch (e) {
-        console.warn(`fetchItemDetails error id=${id} attempt=${attempts}`, e)
+        console.warn(`fetchItemDetailsWithAvailability error id=${id} attempt=${attempts}`, e)
         await sleep(delayMs * attempts)
       }
     }
-    // small pause between requests even on success
     await sleep(delayMs)
   }
   return map
 }
 
-const fetchAvailabilityForIds = async (ids, dateStr) => {
-  const availBookings = []
-  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-  const delayMs = 150
-  // sanitize ids
-  const sanitized = (ids || []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
-  const invalid = (ids || []).filter(id => !sanitized.includes(Number(id)))
-  if (invalid.length) console.warn('fetchAvailabilityForIds: skipping invalid ids', invalid)
-  for (const id of sanitized) {
-    let attempts = 0
-    const maxAttempts = 3
-    let ok = false
-    while (!ok && attempts < maxAttempts) {
-      attempts += 1
-      try {
-  const availUrl = `${baseUrl}/space/availability?lid=${locationId}&date=${dateStr}&eid=${id}`
-  console.log('API Request:', availUrl)
-  const res = await apiFetch(availUrl, { headers: { 'Authorization': `Bearer ${token}` } })
-        console.log(`fetchAvailabilityForIds: id=${id} attempt=${attempts} status=${res.status}`)
-        if (!res.ok) {
-          if (res.status >= 500) {
-            await sleep(delayMs * attempts)
-            continue
-          }
-          try {
-            const txt = await res.text()
-            console.warn(`fetchAvailabilityForIds: id=${id} client error ${res.status}: ${txt}`)
-          } catch (e) {
-            console.warn(`fetchAvailabilityForIds: id=${id} client error ${res.status}`)
-          }
-          break
-        }
-        const data = await res.json()
-        const arr = Array.isArray(data) ? data : (data.availability || data.items || [])
-        if (!Array.isArray(arr)) { ok = true; break }
-        for (const seg of arr) {
-          const status = (seg.status || '').toString().toLowerCase()
-          const bookedCandidate = seg.bookId || seg.id || seg.booked || (status && (status.includes('book') || status.includes('unavail') || status.includes('busy') || seg.available === false))
-          if (!bookedCandidate) continue
-          const from = seg.fromDate || seg.from || seg.start || seg.startDate || seg.start_time || seg.startTime
-          const to = seg.toDate || seg.to || seg.end || seg.endDate || seg.end_time || seg.endTime
-          if (!from || !to) continue
-          availBookings.push({ id: `${id}-${from}-${to}`, eid: Number(id), fromDate: from, toDate: to, status: 'Confirmed', source: 'availability' })
-        }
-        ok = true
-      } catch (e) {
-        console.warn(`fetchAvailabilityForIds error id=${id} attempt=${attempts}`, e)
-        await sleep(delayMs * attempts)
-      }
-    }
-    await sleep(delayMs)
-  }
-  return availBookings
-}
 
 const enrichRoomsWithAPIData = async (idsParam = null) => {
   const envIds = Array.isArray(roomItemIds) && roomItemIds.length ? roomItemIds.map(Number) : []
@@ -391,43 +399,11 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
   }
   const ids = Array.from(idSet)
 
-  // Fetch item details for these ids
-  const itemMap = await fetchItemDetails(ids)
+  // Fetch item details + availability for these ids
+  const dateStr = currentDate.value.toISOString().split('T')[0]
+  const itemMap = await fetchItemDetailsWithAvailability(ids, dateStr)
 
-  // If any items missing, try bulk endpoints to locate them
-  const missing = ids.filter(id => !itemMap[id])
-  if (missing.length) {
-    const bulkEndpoints = [
-  `${baseUrl}/space/item?lid=${locationId}`,
-  `${baseUrl}/space/item`,
-      `${baseUrl}/space/locations/${locationId}`,
-      `${baseUrl}/space/locations/${locationId}/items`
-    ]
-    for (const ep of bulkEndpoints) {
-      try {
-  console.log('API Request:', ep)
-  const res = await apiFetch(ep, { headers: { 'Authorization': `Bearer ${token}` } })
-        if (!res.ok) continue
-        const data = await res.json()
-        const arr = Array.isArray(data) ? data : (data.items || data.spaces || data.rooms || [])
-        if (!Array.isArray(arr)) continue
-        for (const item of arr) {
-          const id = item.id || item.eid || item.iid || item.item_id || item.space_id
-          if (!id) continue
-          const numericId = Number(id)
-          if (idSet.has(numericId) && !itemMap[numericId]) {
-            itemMap[numericId] = item
-            itemCache[numericId] = item
-          }
-        }
-        // refresh missing
-        const stillMissing = ids.filter(id => !itemMap[id])
-        if (!stillMissing.length) break
-      } catch (e) {
-        // ignore
-      }
-    }
-  }
+  // Bulk endpoints removed: all metadata and availability now fetched per-id
 
   // Build rooms list from itemMap, bookings, and roomMeta fallback
   const newRooms = ids.map(id => {
@@ -437,11 +413,21 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
     let name = (item && (item.name || item.item_name)) || (booking && booking.item_name) || `Room ${numId}`
     if (!name || String(name).trim() === '') name = `Room ${numId}`
     const zone = (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || inferZoneFromName(name)
-      const capacity = (item && item.capacity != null) ? Number(item.capacity) : (roomMeta && roomMeta[numId] != null ? Number(roomMeta[numId]) : null)
-      return { id: numId, name, zone, capacity }
+    const capacity = (item && item.capacity != null) ? Number(item.capacity) : (roomMeta && roomMeta[numId] != null ? Number(roomMeta[numId]) : null)
+    // Extract availability segments from item API response
+    let availability = null
+    if (item && Array.isArray(item.availability)) {
+      // LibCal returns array of segments with from/to or start/end
+      availability = item.availability.map(seg => ({
+        from: seg.from || seg.start || seg.fromDate || seg.startDate,
+        to: seg.to || seg.end || seg.toDate || seg.endDate,
+        id: seg.id || seg.bookId || undefined
+      })).filter(seg => seg.from && seg.to)
+    }
+    return { id: numId, name, zone, capacity, availability }
   })
-    // Ensure ids and capacities are normalized to numbers
-    rooms.value = newRooms.map(r => ({ ...r, id: Number(r.id), capacity: r.capacity != null ? Number(r.capacity) : null }))
+  // Ensure ids and capacities are normalized to numbers
+  rooms.value = newRooms.map(r => ({ ...r, id: Number(r.id), capacity: r.capacity != null ? Number(r.capacity) : null }))
   console.log('Room metadata updated from API/items endpoint; items fetched:', Object.keys(itemMap).length)
 }
 
@@ -493,8 +479,8 @@ const sortedRooms = computed(() => {
 })
 
 const getBookingStyle = (booking) => {
-  const start = new Date(booking.fromDate)
-  const end = new Date(booking.toDate)
+  const start = new Date(booking.fromDate || booking.from || booking.start)
+  const end = new Date(booking.toDate || booking.to || booking.end)
   const startMinutes = start.getHours() * 60 + start.getMinutes()
   const endMinutes = end.getHours() * 60 + end.getMinutes()
   const openStart = 8 * 60
@@ -505,9 +491,16 @@ const getBookingStyle = (booking) => {
   if (adjStart >= adjEnd) return { display: 'none' }
   const left = ((adjStart - openStart) / totalMinutes) * 100
   const width = ((adjEnd - adjStart) / totalMinutes) * 100
+  // If this is an API availability segment, color red; else green
+  const isApiAvailability = booking.isApiAvailability || (booking.from && booking.to)
   return {
     left: `${left}%`,
-    width: `${width}%`
+    width: `${width}%`,
+    background: isApiAvailability ? '#e74c3c' : '#27ae60',
+    borderRadius: '4px',
+    height: '20px',
+    position: 'absolute',
+    top: 0
   }
 }
 
