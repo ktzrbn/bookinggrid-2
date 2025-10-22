@@ -108,6 +108,44 @@ const dedupeBookings = (arr) => {
   return out
 }
 
+// Global request throttling wrapper
+const REQUEST_DELAY_MS = 150 // spacing between requests
+let _lastRequestAt = 0
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+const apiFetch = async (input, init = {}) => {
+  const now = Date.now()
+  const since = now - _lastRequestAt
+  if (since < REQUEST_DELAY_MS) {
+    await sleep(REQUEST_DELAY_MS - since)
+  }
+  try {
+    const res = await fetch(input, init)
+    _lastRequestAt = Date.now()
+    if (res.status === 401 || res.status === 403) {
+      // authorization problems - surface a clear error and stop further requests
+      let txt = ''
+      try { txt = await res.text() } catch (e) { /* ignore */ }
+      const msg = `Authorization error (${res.status}). Token may be missing or expired. ${txt}`
+      console.error(msg)
+      if (typeof error !== 'undefined') error.value = 'Authorization error: please update VITE_LIBCAL_TOKEN in .env (token missing or expired)'
+      throw new Error(msg)
+    }
+    if (res.status >= 400 && res.status < 500) {
+      // log client errors with body
+      try {
+        const txt = await res.text()
+        console.warn(`apiFetch client error ${res.status} ${input}: ${txt}`)
+      } catch (e) {
+        console.warn(`apiFetch client error ${res.status} ${input}`)
+      }
+    }
+    return res
+  } catch (e) {
+    _lastRequestAt = Date.now()
+    throw e
+  }
+}
+
 const rooms = ref([])
 const bookings = ref([])
 const loading = ref(true)
@@ -162,7 +200,9 @@ const fetchBookings = async () => {
   try {
     const dateStr = currentDate.value.toISOString().split('T')[0]
     console.log('Fetching bookings for', dateStr)
-    const response = await fetch(`${baseUrl}/space/bookings?lid=${locationId}&date=${dateStr}`, {
+  const bookingsUrl = `${baseUrl}/space/bookings?lid=${locationId}&date=${dateStr}`
+  console.log('API Request:', bookingsUrl)
+  const response = await apiFetch(bookingsUrl, {
       headers: {
         'Authorization': `Bearer ${token}`
       }
@@ -227,14 +267,17 @@ const getBookingsForRoom = (roomId) => {
 
 const fetchItemDetails = async (ids) => {
   const map = {}
-  // populate from cache first
-  for (const id of ids) {
+  // sanitize ids to numeric positives and populate from cache first
+  const sanitized = (ids || []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+  const invalid = (ids || []).filter(id => !sanitized.includes(Number(id)))
+  if (invalid.length) console.warn('fetchItemDetails: skipping invalid ids', invalid)
+  for (const id of sanitized) {
     if (itemCache[id]) map[id] = itemCache[id]
   }
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
   // Throttle: run sequential requests with a small delay to avoid hitting API rate limits
   const delayMs = 150 // ~6-7 requests per second (well below 25 req/s)
-  for (const id of ids) {
+  for (const id of sanitized) {
     // skip if we already have it from cache or a previous fetch
     if (map[id]) continue
     let attempts = 0
@@ -243,7 +286,9 @@ const fetchItemDetails = async (ids) => {
     while (!ok && attempts < maxAttempts) {
       attempts += 1
       try {
-        const res = await fetch(`${baseUrl}/space/items/${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
+  const itemUrl = `${baseUrl}/space/item/${id}`
+  console.log('API Request:', itemUrl)
+  const res = await apiFetch(itemUrl, { headers: { 'Authorization': `Bearer ${token}` } })
         console.log(`fetchItemDetails: id=${id} attempt=${attempts} status=${res.status}`)
         if (res.ok) {
           const data = await res.json()
@@ -258,7 +303,13 @@ const fetchItemDetails = async (ids) => {
           // server error - retry
           await sleep(delayMs * attempts)
         } else {
-          // client error or not found - don't retry
+          // client error or not found - don't retry, but log body for debugging
+          try {
+            const txt = await res.text()
+            console.warn(`fetchItemDetails: id=${id} client error ${res.status}: ${txt}`)
+          } catch (e) {
+            console.warn(`fetchItemDetails: id=${id} client error ${res.status}`)
+          }
           ok = true
           break
         }
@@ -277,19 +328,31 @@ const fetchAvailabilityForIds = async (ids, dateStr) => {
   const availBookings = []
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
   const delayMs = 150
-  for (const id of ids) {
+  // sanitize ids
+  const sanitized = (ids || []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+  const invalid = (ids || []).filter(id => !sanitized.includes(Number(id)))
+  if (invalid.length) console.warn('fetchAvailabilityForIds: skipping invalid ids', invalid)
+  for (const id of sanitized) {
     let attempts = 0
     const maxAttempts = 3
     let ok = false
     while (!ok && attempts < maxAttempts) {
       attempts += 1
       try {
-        const res = await fetch(`${baseUrl}/space/availability?lid=${locationId}&date=${dateStr}&eid=${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
+  const availUrl = `${baseUrl}/space/availability?lid=${locationId}&date=${dateStr}&eid=${id}`
+  console.log('API Request:', availUrl)
+  const res = await apiFetch(availUrl, { headers: { 'Authorization': `Bearer ${token}` } })
         console.log(`fetchAvailabilityForIds: id=${id} attempt=${attempts} status=${res.status}`)
         if (!res.ok) {
           if (res.status >= 500) {
             await sleep(delayMs * attempts)
             continue
+          }
+          try {
+            const txt = await res.text()
+            console.warn(`fetchAvailabilityForIds: id=${id} client error ${res.status}: ${txt}`)
+          } catch (e) {
+            console.warn(`fetchAvailabilityForIds: id=${id} client error ${res.status}`)
           }
           break
         }
@@ -335,14 +398,15 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
   const missing = ids.filter(id => !itemMap[id])
   if (missing.length) {
     const bulkEndpoints = [
-      `${baseUrl}/space/items?lid=${locationId}`,
-      `${baseUrl}/space/items`,
+  `${baseUrl}/space/item?lid=${locationId}`,
+  `${baseUrl}/space/item`,
       `${baseUrl}/space/locations/${locationId}`,
       `${baseUrl}/space/locations/${locationId}/items`
     ]
     for (const ep of bulkEndpoints) {
       try {
-        const res = await fetch(ep, { headers: { 'Authorization': `Bearer ${token}` } })
+  console.log('API Request:', ep)
+  const res = await apiFetch(ep, { headers: { 'Authorization': `Bearer ${token}` } })
         if (!res.ok) continue
         const data = await res.json()
         const arr = Array.isArray(data) ? data : (data.items || data.spaces || data.rooms || [])
