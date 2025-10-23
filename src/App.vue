@@ -1,6 +1,7 @@
 <template>
   <div id="app">
-    <h1>{{ libraryName }} Room Reservation System</h1>
+    <img src="/URI_11-16_21-3.jpg" alt="Library Header" class="header-image" />
+    <h1>Reserve a Study Room at the Carothers Library</h1>
 
     <div class="header">
       <p>Viewing: {{ formatDate(currentDate) }}</p>
@@ -12,7 +13,7 @@
 
   <nav class="filters">
       <label>
-        Zone
+        Floor
         <select v-model="selectedZone">
           <option v-for="zone in zones" :key="zone" :value="zone">{{ zone }}</option>
         </select>
@@ -38,54 +39,64 @@
     <div v-else class="rooms">
       <div v-if="filteredSortedRooms.length === 0" class="no-rooms">No rooms available for this date.</div>
       <div v-for="room in filteredSortedRooms" :key="room.id" class="room-card" :class="{ expanded: expandedRooms.includes(room.id) }" @click="toggleExpanded(room.id)">
-  <h3>{{ room.name }}</h3>
-  <div class="room-meta">Capacity: <strong>{{ room.capacity ?? 'Unknown' }}</strong></div>
-        <div class="timeline">
-          <template v-if="!expandedRooms.includes(room.id)">
-            <div class="time-label" style="left: 0%;">8 AM</div>
-            <div class="time-label" style="left: 50%;">12 PM</div>
-            <div class="time-label" style="right: 0;">11 PM</div>
-          </template>
-          <template v-else>
-            <div
-              v-for="i in 16"
-              :key="i"
-              class="time-label"
-              :style="{ left: `${((i - 1) / 15) * 100}%` }"
-            >
-              {{ ((i + 7) % 12 || 12) }} {{ i + 7 >= 12 ? 'PM' : 'AM' }}
-            </div>
-          </template>
-          <!-- Render availability segments from item API if present, else fallback to bookings -->
-          <template v-if="room.availability && Array.isArray(room.availability)">
-            <template v-for="(segment, idx) in getTimelineSegments(room.availability)" :key="idx">
-              <div
-                class="booking-segment"
-                :style="getBookingStyle(segment)"
-                :title="formatTime(segment.from) + ' - ' + formatTime(segment.to)"
-              ></div>
-            </template>
-          </template>
-          <template v-else>
-            <div
-              v-for="booking in getBookingsForRoom(room.id)"
-              :key="booking.id"
-              class="booking-segment"
-              :style="getBookingStyle(booking)"
-              :title="formatTime(booking.fromDate) + ' - ' + formatTime(booking.toDate)"
-            ></div>
-          </template>
+        <div v-if="isRoomAvailableNow(room)" class="availability-pill">Available Now</div>
+        <h3>{{ room.name }}<span v-if="expandedRooms.includes(room.id)"> - {{ room.zone }}</span></h3>
+        <div class="room-meta">Capacity: <strong>{{ room.capacity ?? 'Unknown' }}</strong></div>
+        <img v-if="expandedRooms.includes(room.id)" src="/facade.jpg" alt="Library Facade" class="modal-facade" @click.stop />
+        <p v-if="expandedRooms.includes(room.id) && !selectedStartTime" class="booking-instruction" @click.stop>Click on the timeline above to select a start time for your 1-hour booking.</p>
+        <form v-if="expandedRooms.includes(room.id) && selectedStartTime" @submit.prevent="bookRoom(room)" @click.stop class="booking-form">
+          <h4>Book this room from {{ formatTime(selectedStartTime) }} for 1 hour</h4>
+          <input v-model="fname" type="text" placeholder="First Name" required />
+          <input v-model="lname" type="text" placeholder="Last Name" required />
+          <input v-model="email" type="email" placeholder="URI.edu Email" required pattern=".*@uri\.edu$" />
+          <button type="submit">Book Now</button>
+        </form>
+        <div class="timeline" style="position: relative; height: 24px;" @mousemove="updateHoverTime" @mouseleave="clearHoverTime" @click.stop="selectTime">
+          <div class="time-label" style="left: 0%;">{{ formatTimeLabel('start') }}</div>
+          <div class="time-label" style="left: 50%;">{{ formatTimeLabel('middle') }}</div>
+          <div class="time-label" style="right: 0%;">{{ formatTimeLabel('end') }}</div>
+          <div v-if="hoverTime && expandedRooms.includes(room.id)" class="hover-tooltip" :style="{ left: hoverLeft + 'px' }">{{ hoverTime }}</div>
+          <div
+            v-for="(segment, idx) in room.availability && Array.isArray(room.availability)
+              ? getTimelineSegments(room.availability)
+              : getBookingsForRoom(room.id)"
+            :key="segment.id || idx"
+            class="booking-segment"
+            :style="getBookingStyle(segment)"
+            :title="formatTime(segment.from || segment.fromDate) + ' - ' + formatTime(segment.to || segment.toDate)"
+          ></div>
         </div>
       </div>
-    </div>
-
-    <div v-if="expandedRooms.length > 0" class="backdrop" @click="expandedRooms = []"></div>
+      </div>
   </div>
-</template>
 
-<script setup>
+      <div v-if="expandedRooms.length > 0" class="backdrop" @click="expandedRooms = []"></div>
+
+</template><script setup>
+// Use flexbox for timeline segments so they fill horizontally and stack correctly
+function getBookingStyle(booking) {
+  const start = new Date(booking.fromDate || booking.from || booking.start);
+  const end = new Date(booking.toDate || booking.to || booking.end);
+  const startMinutes = start.getHours() * 60 + start.getMinutes();
+  const endMinutes = end.getHours() * 60 + end.getMinutes();
+  const { openStart, openEnd } = getOpenRange(currentDate.value);
+  const totalMinutes = openEnd - openStart;
+  const adjStart = Math.max(startMinutes, openStart);
+  const adjEnd = Math.min(endMinutes, openEnd);
+  if (adjStart >= adjEnd) return { display: 'none' };
+  const left = ((adjStart - openStart) / totalMinutes) * 100;
+  const width = ((adjEnd - adjStart) / totalMinutes) * 100;
+  const isApiAvailability = booking.isApiAvailability || (booking.fromDate && booking.toDate);
+  return {
+    position: 'absolute',
+    left: `${left}%`,
+    width: `${width}%`,
+    background: isApiAvailability ? '#e74c3c' : '#27ae60',
+    borderRadius: '4px',
+    height: '100%',
+  };
+}
 import { ref, onMounted, computed, watch } from 'vue'
-import roomMeta from './roomMeta.json'
 import roomZones from './roomZones.json'
 // Given API availability segments, return a full timeline sequence covering open hours, with red for unavailable and green for available
 function getTimelineSegments(availability) {
@@ -102,17 +113,17 @@ function getTimelineSegments(availability) {
   for (const seg of sorted) {
     const segStart = parseTime(seg.from)
     const segEnd = parseTime(seg.to)
-    // If there's a gap before this segment, add a green segment
+    // If there's a gap before this segment, add a red segment (unavailable)
     if (segStart > cursor) {
-      segments.push({ from: minutesToTime(cursor), to: minutesToTime(segStart), isApiAvailability: false })
+      segments.push({ from: minutesToTime(cursor), to: minutesToTime(segStart), isApiAvailability: true })
     }
-    // Add the red segment for unavailable
-    segments.push({ from: minutesToTime(segStart), to: minutesToTime(segEnd), isApiAvailability: true })
+    // Add the green segment for available
+    segments.push({ from: minutesToTime(segStart), to: minutesToTime(segEnd), isApiAvailability: false })
     cursor = Math.max(cursor, segEnd)
   }
-  // If there's time after the last segment, add a green segment
+  // If there's time after the last segment, add a red segment (unavailable)
   if (cursor < openEnd) {
-    segments.push({ from: minutesToTime(cursor), to: minutesToTime(openEnd), isApiAvailability: false })
+    segments.push({ from: minutesToTime(cursor), to: minutesToTime(openEnd), isApiAvailability: true })
   }
   return segments
 }
@@ -212,6 +223,12 @@ const currentDate = ref(new Date())
 const selectedZone = ref('All')
 const selectedRoomName = ref('All')
 const selectedCapacity = ref('All')
+const hoverTime = ref(null)
+const hoverLeft = ref(0)
+const fname = ref('')
+const lname = ref('')
+const email = ref('')
+const selectedStartTime = ref(null)
 
 const fetchRooms = async () => {
   // Rooms will be set from bookings
@@ -246,7 +263,7 @@ const buildRoomsFromBookings = (bookingList) => {
       id: Number(id),
       name: b ? b.item_name : `Room ${id}`,
       zone: b ? b.category_name : 'Uncategorized',
-      capacity: roomMeta && roomMeta[id] ? Number(roomMeta[id]) : null
+      capacity: null
     }
   })
   rooms.value = baseRooms
@@ -405,15 +422,18 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
 
   // Bulk endpoints removed: all metadata and availability now fetched per-id
 
-  // Build rooms list from itemMap, bookings, and roomMeta fallback
+  // Build rooms list from itemMap and bookings
   const newRooms = ids.map(id => {
     const numId = Number(id)
     const item = itemMap[numId]
     const booking = bookings.value.find(b => Number(b.eid) === numId)
     let name = (item && (item.name || item.item_name)) || (booking && booking.item_name) || `Room ${numId}`
     if (!name || String(name).trim() === '') name = `Room ${numId}`
-    const zone = (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || inferZoneFromName(name)
-    const capacity = (item && item.capacity != null) ? Number(item.capacity) : (roomMeta && roomMeta[numId] != null ? Number(roomMeta[numId]) : null)
+    const zoneMapping = { "12348": "Lower Level" }
+    let zone = (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || inferZoneFromName(name)
+    zone = zoneMapping[zone] || zone
+    zone = roomZones[numId] || zone
+    const capacity = (item && item.capacity != null) ? Number(item.capacity) : null
     // Extract availability segments from item API response
     let availability = null
     if (item && Array.isArray(item.availability)) {
@@ -478,35 +498,123 @@ const sortedRooms = computed(() => {
   })
 })
 
-const getBookingStyle = (booking) => {
-  const start = new Date(booking.fromDate || booking.from || booking.start)
-  const end = new Date(booking.toDate || booking.to || booking.end)
-  const startMinutes = start.getHours() * 60 + start.getMinutes()
-  const endMinutes = end.getHours() * 60 + end.getMinutes()
-  const openStart = 8 * 60
-  const openEnd = 23 * 60
-  const totalMinutes = 15 * 60
-  const adjStart = Math.max(startMinutes, openStart)
-  const adjEnd = Math.min(endMinutes, openEnd)
-  if (adjStart >= adjEnd) return { display: 'none' }
-  const left = ((adjStart - openStart) / totalMinutes) * 100
-  const width = ((adjEnd - adjStart) / totalMinutes) * 100
-  // If this is an API availability segment, color red; else green
-  const isApiAvailability = booking.isApiAvailability || (booking.from && booking.to)
-  return {
-    left: `${left}%`,
-    width: `${width}%`,
-    background: isApiAvailability ? '#e74c3c' : '#27ae60',
-    borderRadius: '4px',
-    height: '20px',
-    position: 'absolute',
-    top: 0
-  }
-}
-
 const formatTime = (isoString) => {
   const date = new Date(isoString)
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
+const formatTimeLabel = (position) => {
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  if (position === 'start') return formatTime(minutesToTime(openStart))
+  if (position === 'middle') return formatTime(minutesToTime((openStart + openEnd) / 2))
+  if (position === 'end') return formatTime(minutesToTime(openEnd))
+  return ''
+}
+
+const updateHoverTime = (event) => {
+  const rect = event.currentTarget.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const percent = Math.max(0, Math.min(1, x / rect.width))
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  const minutes = openStart + percent * (openEnd - openStart)
+  const minutesRounded = Math.round(minutes / 5) * 5
+  hoverTime.value = formatTime(minutesToTime(minutesRounded))
+  hoverLeft.value = x
+}
+
+const clearHoverTime = () => {
+  hoverTime.value = null
+}
+
+const selectTime = (event) => {
+  console.log('Timeline clicked')
+  const rect = event.currentTarget.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const percent = Math.max(0, Math.min(1, x / rect.width))
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  const minutes = openStart + percent * (openEnd - openStart)
+  const minutesRounded = Math.round(minutes / 5) * 5 // round to 5 min
+  selectedStartTime.value = minutesToTime(minutesRounded)
+  console.log('Selected time:', selectedStartTime.value)
+}
+
+const isRoomAvailableNow = (room) => {
+  const now = new Date()
+  const currentTime = now.getHours() * 60 + now.getMinutes()
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  
+  // Check if current time is within open hours
+  if (currentTime < openStart || currentTime > openEnd) return false
+  
+  // Check if there's an available segment covering now
+  if (room.availability && Array.isArray(room.availability)) {
+    return room.availability.some(seg => {
+      const start = new Date(seg.from || seg.start)
+      const end = new Date(seg.to || seg.end)
+      const startTime = start.getHours() * 60 + start.getMinutes()
+      const endTime = end.getHours() * 60 + end.getMinutes()
+      return currentTime >= startTime && currentTime <= endTime
+    })
+  }
+  
+  // Fallback: if no availability data, check if no bookings cover now
+  const bookings = getBookingsForRoom(room.id)
+  return !bookings.some(booking => {
+    const start = new Date(booking.fromDate)
+    const end = new Date(booking.toDate)
+    const startTime = start.getHours() * 60 + start.getMinutes()
+    const endTime = end.getHours() * 60 + end.getMinutes()
+    return currentTime >= startTime && currentTime <= endTime
+  })
+}
+
+const bookRoom = async (room) => {
+  console.log('Booking room:', room.id, 'at', selectedStartTime.value)
+  const startDate = new Date(currentDate.value)
+  startDate.setHours(0, selectedStartTime.value, 0, 0)
+  const start = startDate.toISOString()
+  const end = new Date(startDate.getTime() + 60 * 60 * 1000).toISOString() // +1 hour
+
+  const data = new URLSearchParams({
+    eid: room.id,
+    lid: import.meta.env.VITE_LOCATION_ID,
+    start: start,
+    fname: fname.value,
+    lname: lname.value,
+    email: email.value
+  })
+
+  console.log('Sending data:', data.toString())
+
+  try {
+    const response = await fetch('/api/1.1/space/book', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${import.meta.env.VITE_LIBCAL_TOKEN}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: data
+    })
+
+    console.log('Response status:', response.status)
+    const responseText = await response.text()
+    console.log('Response:', responseText)
+
+    if (response.ok) {
+      alert('Booking successful!')
+      fname.value = ''
+      lname.value = ''
+      email.value = ''
+      selectedStartTime.value = null
+      // Optionally refresh data
+      fetchBookings()
+    } else {
+      alert('Booking failed: ' + responseText)
+    }
+  } catch (error) {
+    console.error('Booking error:', error)
+    alert('Booking error: ' + error.message)
+  }
 }
 
 const formatHalfHour = (i) => {
@@ -533,18 +641,7 @@ const goToToday = () => {
 
 // Filter state and derived lists
 const zones = computed(() => {
-  const set = new Set(rooms.value.map(r => r.zone).filter(Boolean))
-  const allZones = Array.from(set)
-  const preferred = ['Lower Level', 'First Floor', 'Second Floor', 'Third Floor']
-  const sorted = allZones.sort((a, b) => {
-    const ai = preferred.findIndex(p => p.toLowerCase() === a.toLowerCase())
-    const bi = preferred.findIndex(p => p.toLowerCase() === b.toLowerCase())
-    if (ai === -1 && bi === -1) return a.localeCompare(b)
-    if (ai === -1) return 1
-    if (bi === -1) return -1
-    return ai - bi
-  })
-  return ['All', ...sorted]
+  return ['All', 'Lower Level', 'First Floor', 'Second Floor', 'Third Floor']
 })
 
 const roomNames = computed(() => {
@@ -595,6 +692,7 @@ const toggleExpanded = (id) => {
   const index = expandedRooms.value.indexOf(id)
   if (index > -1) {
     expandedRooms.value.splice(index, 1)
+    selectedStartTime.value = null // Reset selection when closing modal
   } else {
     expandedRooms.value.push(id)
   }
@@ -619,6 +717,21 @@ onMounted(async () => {
   margin-top: 60px;
 }
 
+.header-image {
+  width: 100%;
+  max-height: 300px;
+  object-fit: cover;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+h1 {
+  color: #002D5B;
+  font-size: 2.5em;
+  margin-bottom: 10px;
+}
+
 .header {
   display: flex;
   justify-content: center;
@@ -629,7 +742,7 @@ onMounted(async () => {
 
 .header button {
   padding: 10px 20px;
-  background-color: #007bff;
+  background-color: #002D5B;
   color: white;
   border: none;
   border-radius: 5px;
@@ -637,7 +750,70 @@ onMounted(async () => {
 }
 
 .header button:hover {
-  background-color: #0056b3;
+  background-color: #001F3F;
+}
+
+.availability-pill {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background-color: #27ae60;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+  z-index: 1;
+}
+
+.modal-facade {
+  width: 100%;
+  max-height: 200px;
+  object-fit: cover;
+  border-radius: 8px;
+  margin: 20px 0;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.booking-instruction {
+  text-align: center;
+  color: #002D5B;
+  font-weight: bold;
+  margin: 20px 0;
+}
+
+.booking-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 20px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.booking-form h4 {
+  margin: 0 0 10px 0;
+  color: #002D5B;
+}
+
+.booking-form input {
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.booking-form button {
+  padding: 10px;
+  background-color: #002D5B;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.booking-form button:hover {
+  background-color: #001F3F;
 }
 
 .filters {
@@ -696,7 +872,11 @@ onMounted(async () => {
   height: 80%;
   z-index: 1001;
   margin: 0;
-  background: white;
+  background: #e3f2fd;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  border: 3px solid #dee2e6;
+  border-radius: 16px;
+  padding: 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -715,31 +895,57 @@ onMounted(async () => {
 
 .timeline {
   position: relative;
-  height: 20px;
-  background-color: green;
-  border-radius: 10px;
+  height: 24px;
+  background-color: #27ae60;
+  border: 1px solid #ddd;
+  border-radius: 12px;
   margin-top: 8px;
+  cursor: pointer;
+}
+
+.hover-tooltip {
+  position: absolute;
+  top: -30px;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.room-card.expanded .hover-tooltip {
+  top: -35px;
 }
 
 .room-card.expanded .timeline {
   height: 40px;
   width: 80%;
+  border-radius: 20px;
 }
 
 .booking-segment {
   position: absolute;
   top: 0;
   height: 100%;
-  background-color: red;
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
+  pointer-events: none;
+}
+
+.room-card.expanded .booking-segment {
+  border-radius: 20px;
 }
 
 .time-label {
   position: absolute;
-  top: 22px;
+  top: 26px;
   font-size: 10px;
-  color: #333;
-  opacity: 0;
+  color: #666;
+  opacity: 1;
   transition: opacity 0.2s;
   pointer-events: none;
   white-space: nowrap;
@@ -752,7 +958,8 @@ onMounted(async () => {
 }
 
 .room-card.expanded h3 {
-  font-size: 24px;
+  font-size: 32px;
+  font-weight: bold;
 }
 
 .room-card.expanded .time-label {

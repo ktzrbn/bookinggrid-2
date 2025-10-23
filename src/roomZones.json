@@ -1,4 +1,16 @@
 {
-  "# Example mapping": "Add mappings from room eid to zone here, e.g. \"211617\": \"Lower Level\"",
-  "# Note": "This file is optional. If empty, the app will attempt to infer zones from room names and fall back to category."
+  "211588": "Lower Level",
+  "211612": "Lower Level",
+  "211613": "Lower Level",
+  "211614": "Lower Level",
+  "211615": "Lower Level",
+  "211616": "Lower Level",
+  "211596": "Lower Level",
+  "211597": "Lower Level",
+  "211598": "Lower Level",
+  "211606": "Lower Level",
+  "211607": "Lower Level",
+  "211609": "Lower Level",
+  "211610": "Lower Level",
+  "211611": "Lower Level"
 }
