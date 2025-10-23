@@ -43,19 +43,12 @@
         <h3>{{ room.name }}<span v-if="expandedRooms.includes(room.id)"> - {{ room.zone }}</span></h3>
         <div class="room-meta">Capacity: <strong>{{ room.capacity ?? 'Unknown' }}</strong></div>
         <img v-if="expandedRooms.includes(room.id)" src="/facade.jpg" alt="Library Facade" class="modal-facade" @click.stop />
-        <p v-if="expandedRooms.includes(room.id) && !selectedStartTime" class="booking-instruction" @click.stop>Click on the timeline above to select a start time for your 1-hour booking.</p>
-        <form v-if="expandedRooms.includes(room.id) && selectedStartTime" @submit.prevent="bookRoom(room)" @click.stop class="booking-form">
-          <h4>Book this room from {{ formatTime(selectedStartTime) }} for 1 hour</h4>
-          <input v-model="fname" type="text" placeholder="First Name" required />
-          <input v-model="lname" type="text" placeholder="Last Name" required />
-          <input v-model="email" type="email" placeholder="URI.edu Email" required pattern=".*@uri\.edu$" />
-          <button type="submit">Book Now</button>
-        </form>
-        <div class="timeline" style="position: relative; height: 24px;" @mousemove="updateHoverTime" @mouseleave="clearHoverTime" @click.stop="selectTime">
+        <div class="timeline" style="position: relative; height: 24px;" @mousemove="updateHoverTime" @mouseleave="clearHoverTime">
           <div class="time-label" style="left: 0%;">{{ formatTimeLabel('start') }}</div>
           <div class="time-label" style="left: 50%;">{{ formatTimeLabel('middle') }}</div>
           <div class="time-label" style="right: 0%;">{{ formatTimeLabel('end') }}</div>
           <div v-if="hoverTime && expandedRooms.includes(room.id)" class="hover-tooltip" :style="{ left: hoverLeft + 'px' }">{{ hoverTime }}</div>
+          <div v-if="selectedTimes[room.id] && expandedRooms.includes(room.id)" class="selected-booking" :style="getSelectedBookingStyle(room.id)" @mousedown="startDrag(room.id, $event)">{{ duration }} min</div>
           <div
             v-for="(segment, idx) in room.availability && Array.isArray(room.availability)
               ? getTimelineSegments(room.availability)
@@ -66,6 +59,28 @@
             :title="formatTime(segment.from || segment.fromDate) + ' - ' + formatTime(segment.to || segment.toDate)"
           ></div>
         </div>
+        <div v-if="expandedRooms.includes(room.id)" class="time-selectors">
+          <label>Start Time: 
+            <select v-model="selectedStarts[room.id]" @change="updateSelection(room.id)">
+              <option value="">Select Start</option>
+              <option v-for="time in timeOptions" :value="time" :key="time">{{ time }}</option>
+            </select>
+          </label>
+          <label>End Time: 
+            <select v-model="selectedEnds[room.id]" @change="updateSelection(room.id)">
+              <option value="">Select End</option>
+              <option v-for="time in timeOptions" :value="time" :key="time">{{ time }}</option>
+            </select>
+          </label>
+        </div>
+        <form v-if="expandedRooms.includes(room.id) && selectedTimes[room.id]" @submit.prevent="bookRoom(room)" @click.stop class="booking-form">
+          <h4>Book this room from {{ formatTime(minutesToTime(selectedTimes[room.id])) }} to {{ formatTime(minutesToTime(selectedTimes[room.id] + duration)) }}</h4>
+          <p>Drag the grey bar on the timeline to adjust duration (30 min - 3 hours)</p>
+          <input v-model="fname" type="text" placeholder="First Name" required />
+          <input v-model="lname" type="text" placeholder="Last Name" required />
+          <input v-model="email" type="email" placeholder="URI.edu Email" required pattern=".*@uri\.edu$" />
+          <button type="submit">Book Now</button>
+        </form>
       </div>
       </div>
   </div>
@@ -219,6 +234,8 @@ const bookings = ref([])
 const loading = ref(true)
 const error = ref('')
 const expandedRooms = ref([])
+const selectedTimes = ref({})
+const duration = ref(60)
 const currentDate = ref(new Date())
 const selectedZone = ref('All')
 const selectedRoomName = ref('All')
@@ -228,7 +245,42 @@ const hoverLeft = ref(0)
 const fname = ref('')
 const lname = ref('')
 const email = ref('')
-const selectedStartTime = ref(null)
+const selectedStarts = ref({})
+const selectedEnds = ref({})
+const timeOptions = computed(() => {
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  const options = []
+  for (let min = openStart; min <= openEnd; min += 15) {
+    options.push(minutesToTime(min))
+  }
+  return options
+})
+
+const timeToMinutes = (timeStr) => {
+  const [h, m] = timeStr.split(':').map(Number)
+  return h * 60 + m
+}
+
+const updateSelection = (roomId) => {
+  const startTime = selectedStarts.value[roomId]
+  const endTime = selectedEnds.value[roomId]
+  if (startTime && endTime) {
+    const startMin = timeToMinutes(startTime)
+    const endMin = timeToMinutes(endTime)
+    if (endMin > startMin && endMin - startMin >= 30 && endMin - startMin <= 180) {
+      const room = rooms.value.find(r => r.id == roomId)
+      if (room && isPeriodAvailable(room, startMin, endMin)) {
+        selectedTimes.value[roomId] = startMin
+        duration.value = endMin - startMin
+      } else {
+        alert('Selected time is not available')
+      }
+    } else {
+      alert('Invalid time range (30min-3hr)')
+    }
+  }
+}
+const dragging = ref(null)
 
 const fetchRooms = async () => {
   // Rooms will be set from bookings
@@ -526,16 +578,138 @@ const clearHoverTime = () => {
   hoverTime.value = null
 }
 
-const selectTime = (event) => {
-  console.log('Timeline clicked')
+const getSelectedBookingStyle = (id) => {
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  const start = selectedTimes.value[id]
+  const end = start + duration.value
+  const percentStart = ((start - openStart) / (openEnd - openStart)) * 100
+  const percentEnd = ((end - openStart) / (openEnd - openStart)) * 100
+  return {
+    left: `${percentStart}%`,
+    width: `${percentEnd - percentStart}%`
+  }
+}
+
+const startDrag = (id, event) => {
+  const barRect = event.currentTarget.getBoundingClientRect()
+  const clickX = event.clientX - barRect.left
+  const barWidth = barRect.width
+  let type = 'move'
+  if (clickX < barWidth * 0.2) {
+    type = 'resize-start'
+  } else if (clickX > barWidth * 0.8) {
+    type = 'resize-end'
+  }
+  dragging.value = { id, startX: event.clientX, initialStart: selectedTimes.value[id], initialDuration: duration.value, type }
+  event.preventDefault()
+}
+
+const onMouseMove = (event) => {
+  if (dragging.value) {
+    const deltaX = event.clientX - dragging.value.startX
+    const timeline = document.querySelector('.timeline')
+    if (timeline) {
+      const rect = timeline.getBoundingClientRect()
+      const percent = deltaX / rect.width
+      const { openStart, openEnd } = getOpenRange(currentDate.value)
+      const deltaMinutes = percent * (openEnd - openStart)
+      const room = rooms.value.find(r => r.id == dragging.value.id)
+      if (dragging.value.type === 'move') {
+        let newStart = dragging.value.initialStart + Math.round(deltaMinutes / 5) * 5
+        newStart = Math.max(openStart, Math.min(openEnd - duration.value, newStart))
+        // Check if the period is available
+        if (room && isPeriodAvailable(room, newStart, newStart + duration.value)) {
+          selectedTimes.value[dragging.value.id] = newStart
+        }
+      } else if (dragging.value.type === 'resize-end') {
+        let newDuration = dragging.value.initialDuration + Math.round(deltaMinutes / 5) * 5
+        newDuration = Math.max(30, Math.min(180, newDuration))
+        if (room) {
+          const maxAvail = getMaxDuration(room)
+          newDuration = Math.min(newDuration, maxAvail)
+          const start = selectedTimes.value[dragging.value.id]
+          if (isPeriodAvailable(room, start, start + newDuration)) {
+            duration.value = newDuration
+          }
+        }
+      } else if (dragging.value.type === 'resize-start') {
+        let deltaMin = Math.round(deltaMinutes / 5) * 5
+        let newStart = dragging.value.initialStart - deltaMin
+        newStart = Math.max(openStart, newStart)
+        let newDuration = dragging.value.initialDuration + deltaMin
+        newDuration = Math.max(30, Math.min(180, newDuration))
+        if (room) {
+          const maxAvail = getMaxDuration(room)
+          newDuration = Math.min(newDuration, maxAvail)
+          if (isPeriodAvailable(room, newStart, newStart + newDuration)) {
+            selectedTimes.value[dragging.value.id] = newStart
+            duration.value = newDuration
+          }
+        }
+      }
+    }
+  }
+}
+
+const onMouseUp = () => {
+  dragging.value = null
+}
+
+const getMaxDuration = (room) => {
+  const start = selectedTimes.value[room.id]
+  if (!room.availability || !Array.isArray(room.availability)) return 180
+  let maxEnd = start + 180 // max 3 hours
+  for (const seg of room.availability) {
+    const segStart = new Date(seg.from || seg.start).getHours() * 60 + new Date(seg.from || seg.start).getMinutes()
+    const segEnd = new Date(seg.to || seg.end).getHours() * 60 + new Date(seg.to || seg.end).getMinutes()
+    if (segStart <= start && segEnd > start) {
+      maxEnd = Math.min(maxEnd, segEnd)
+    }
+  }
+  return Math.max(30, maxEnd - start)
+}
+
+const isPeriodAvailable = (room, start, end) => {
+  const booked = room.availability && Array.isArray(room.availability) ? room.availability : getBookingsForRoom(room.id)
+  console.log('Checking availability for room', room.id, 'start', start, 'end', end, 'booked length', booked.length)
+  if (booked.length === 0) {
+    console.log('No booked data, assume available')
+    return true
+  }
+  for (const b of booked) {
+    const bStartDate = new Date(b.fromDate || b.from || b.start || b.startDate || b.start_time || b.startTime)
+    const bEndDate = new Date(b.toDate || b.to || b.end || b.endDate || b.end_time || b.endTime)
+    const bStart = bStartDate.getHours() * 60 + bStartDate.getMinutes()
+    const bEnd = bEndDate.getHours() * 60 + bEndDate.getMinutes()
+    console.log('Available slot:', bStart, bEnd)
+    if (bStart < end && bEnd > start) {
+      console.log('Overlaps with available, available')
+      return true
+    }
+  }
+  console.log('No overlap with available, not available')
+  return false
+}
+
+const selectTime = (id, event) => {
+  console.log('Timeline clicked for room', id)
   const rect = event.currentTarget.getBoundingClientRect()
   const x = event.clientX - rect.left
   const percent = Math.max(0, Math.min(1, x / rect.width))
   const { openStart, openEnd } = getOpenRange(currentDate.value)
   const minutes = openStart + percent * (openEnd - openStart)
   const minutesRounded = Math.round(minutes / 5) * 5 // round to 5 min
-  selectedStartTime.value = minutesToTime(minutesRounded)
-  console.log('Selected time:', selectedStartTime.value)
+  const room = rooms.value.find(r => r.id == id)
+  if (room && isPeriodAvailable(room, minutesRounded, minutesRounded + duration.value)) {
+    selectedTimes.value[id] = minutesRounded
+    duration.value = 60 // default 1 hour
+    if (!expandedRooms.value.includes(id)) {
+      toggleExpanded(id)
+    }
+    console.log('Selected time for room', id, ':', selectedTimes.value[id])
+  } else {
+    console.log('Cannot select time for room', id, ': not available')
+  }
 }
 
 const isRoomAvailableNow = (room) => {
@@ -569,11 +743,11 @@ const isRoomAvailableNow = (room) => {
 }
 
 const bookRoom = async (room) => {
-  console.log('Booking room:', room.id, 'at', selectedStartTime.value)
+  console.log('Booking room:', room.id, 'from', selectedTimes.value[room.id], 'for', duration.value, 'minutes')
   const startDate = new Date(currentDate.value)
-  startDate.setHours(0, selectedStartTime.value, 0, 0)
+  startDate.setHours(0, selectedTimes.value[room.id], 0, 0)
   const start = startDate.toISOString()
-  const end = new Date(startDate.getTime() + 60 * 60 * 1000).toISOString() // +1 hour
+  const end = new Date(startDate.getTime() + duration.value * 60 * 1000).toISOString()
 
   const data = new URLSearchParams({
     eid: room.id,
@@ -605,7 +779,10 @@ const bookRoom = async (room) => {
       fname.value = ''
       lname.value = ''
       email.value = ''
-      selectedStartTime.value = null
+      delete selectedTimes.value[room.id] // Reset selection after booking
+      delete selectedStarts.value[room.id]
+      delete selectedEnds.value[room.id]
+      duration.value = 60 // reset to default
       // Optionally refresh data
       fetchBookings()
     } else {
@@ -692,7 +869,9 @@ const toggleExpanded = (id) => {
   const index = expandedRooms.value.indexOf(id)
   if (index > -1) {
     expandedRooms.value.splice(index, 1)
-    selectedStartTime.value = null // Reset selection when closing modal
+    delete selectedTimes.value[id] // Reset selection for this room when closing modal
+    delete selectedStarts.value[id]
+    delete selectedEnds.value[id]
   } else {
     expandedRooms.value.push(id)
   }
@@ -704,6 +883,8 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  window.addEventListener('mousemove', onMouseMove)
+  window.addEventListener('mouseup', onMouseUp)
 })
 </script>
 
@@ -877,10 +1058,7 @@ h1 {
   border: 3px solid #dee2e6;
   border-radius: 16px;
   padding: 32px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  overflow: auto;
 }
 
 .backdrop {
@@ -915,6 +1093,44 @@ h1 {
   white-space: nowrap;
   pointer-events: none;
   z-index: 10;
+}
+
+.selected-booking {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(100, 100, 100, 0.7);
+  border: 2px solid #555;
+  border-radius: 12px;
+  pointer-events: auto;
+  cursor: ew-resize;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 10px;
+  font-weight: bold;
+}
+
+.time-selectors {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.time-selectors label {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+
+.time-selectors select {
+  margin-top: 5px;
+  padding: 5px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
 }
 
 .room-card.expanded .hover-tooltip {
