@@ -37,6 +37,8 @@
     <div v-else-if="error">{{ error }}</div>
 
     <div v-else class="rooms">
+
+
       <div v-if="filteredSortedRooms.length === 0" class="no-rooms">No rooms available for this date.</div>
       <div v-for="room in filteredSortedRooms" :key="room.id" class="room-card" :class="{ expanded: expandedRooms.includes(room.id) }" @click="toggleExpanded(room.id)">
         <div v-if="isRoomAvailableNow(room)" class="availability-pill">Available Now</div>
@@ -88,6 +90,8 @@
       <div v-if="expandedRooms.length > 0" class="backdrop" @click="expandedRooms = []"></div>
 
 </template><script setup>
+import { useTokenManager } from './composables/useAuth.js'
+
 // Use flexbox for timeline segments so they fill horizontally and stack correctly
 function getBookingStyle(booking) {
   const start = new Date(booking.fromDate || booking.from || booking.start);
@@ -195,24 +199,54 @@ const dedupeBookings = (arr) => {
 const REQUEST_DELAY_MS = 150 // spacing between requests
 let _lastRequestAt = 0
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+const { getValidToken } = useTokenManager()
+
 const apiFetch = async (input, init = {}) => {
   const now = Date.now()
   const since = now - _lastRequestAt
   if (since < REQUEST_DELAY_MS) {
     await sleep(REQUEST_DELAY_MS - since)
   }
+  
   try {
-    const res = await fetch(input, init)
+    // Get a valid token (refreshes automatically if needed)
+    const token = await getValidToken()
+    
+    // Add authorization header
+    const headers = {
+      ...init.headers,
+      'Authorization': `Bearer ${token}`
+    }
+    
+    const res = await fetch(input, { ...init, headers })
     _lastRequestAt = Date.now()
+    
     if (res.status === 401 || res.status === 403) {
-      // authorization problems - surface a clear error and stop further requests
+      // Token might be invalid, try refreshing once more
+      try {
+        console.log('Auth failed, attempting token refresh...')
+        const freshToken = await getValidToken()
+        const retryHeaders = {
+          ...init.headers,
+          'Authorization': `Bearer ${freshToken}`
+        }
+        const retryRes = await fetch(input, { ...init, headers: retryHeaders })
+        if (retryRes.ok) {
+          console.log('Retry with refreshed token succeeded')
+          return retryRes
+        }
+      } catch (retryError) {
+        console.warn('Token refresh retry failed:', retryError)
+      }
+      
       let txt = ''
       try { txt = await res.text() } catch (e) { /* ignore */ }
-      const msg = `Authorization error (${res.status}). Token may be missing or expired. ${txt}`
+      const msg = `Authorization error (${res.status}). ${txt}`
       console.error(msg)
-      if (typeof error !== 'undefined') error.value = 'Authorization error: please update VITE_LIBCAL_TOKEN in .env (token missing or expired)'
+      if (typeof error !== 'undefined') error.value = 'API authorization error - token may need manual refresh'
       throw new Error(msg)
     }
+    
     if (res.status >= 400 && res.status < 500) {
       // log client errors with body
       try {
@@ -326,13 +360,11 @@ const fetchBookings = async () => {
   try {
     const dateStr = currentDate.value.toISOString().split('T')[0]
     console.log('Fetching bookings for', dateStr)
-  const bookingsUrl = `${baseUrl}/space/bookings?lid=${locationId}&date=${dateStr}`
-  console.log('API Request:', bookingsUrl)
-  const response = await apiFetch(bookingsUrl, {
-      headers: {
-        'Authorization': `Bearer ${token}`
-      }
-    })
+    const bookingsUrl = `${baseUrl}/space/bookings?lid=${locationId}&date=${dateStr}`
+    console.log('API Request:', bookingsUrl)
+    
+    // apiFetch now handles authorization automatically
+    const response = await apiFetch(bookingsUrl)
     console.log('Response status', response.status)
     if (!response.ok) {
       // No bookings; still build rooms from env ids and enrich
@@ -864,6 +896,8 @@ const capacities = computed(() => {
   // If there are no mapped capacities, fall back to the expected list so the dropdown still shows options
   return filtered.length ? filtered : EXPECTED_CAPACITIES
 })
+
+
 
 const toggleExpanded = (id) => {
   const index = expandedRooms.value.indexOf(id)

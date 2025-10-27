@@ -17,6 +17,11 @@ export default defineConfig({
             }
           });
         }
+      },
+      '/token-refresh': {
+        target: process.env.VITE_TOKEN_REFRESH_URL || 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/token-refresh/, '')
       }
     }
   }
