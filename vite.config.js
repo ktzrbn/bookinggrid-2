@@ -1,15 +1,21 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { fileURLToPath, URL } from 'node:url'
 
-console.log('VITE_LIBCAL_BASE_URL:', process.env.VITE_LIBCAL_BASE_URL);
-console.log('VITE_LIBCAL_OAUTH_URL:', process.env.VITE_LIBCAL_OAUTH_URL);
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('MODE:', process.env.MODE);
+console.log('VITE_LIBCAL_BASE_URL:', process.env.VITE_LIBCAL_BASE_URL)
+console.log('VITE_LIBCAL_OAUTH_URL:', process.env.VITE_LIBCAL_OAUTH_URL)
+console.log('NODE_ENV:', process.env.NODE_ENV)
+console.log('MODE:', process.env.MODE)
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [vue()],
   base: '/',
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url))
+    }
+  },
   build: {
     assetsInlineLimit: 0 // Always copy assets, never inline as base64
   },
@@ -22,9 +28,9 @@ export default defineConfig({
         configure: (proxy, options) => {
           proxy.on('proxyReq', (proxyReq, req, res) => {
             if (req.headers.authorization) {
-              proxyReq.setHeader('Authorization', req.headers.authorization);
+              proxyReq.setHeader('Authorization', req.headers.authorization)
             }
-          });
+          })
         }
       },
       '/oauth': {

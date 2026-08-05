@@ -1071,31 +1071,31 @@ const selectTime = (id, event) => {
 
 const isRoomAvailableNow = (room) => {
   const now = new Date()
-  
+
   // Only show "Available Now" if we're viewing today
   const viewingToday = currentDate.value.toDateString() === now.toDateString()
   if (!viewingToday) return false
-  
+
   const currentTime = now.getHours() * 60 + now.getMinutes()
   const { openStart, openEnd } = getOpenRange(currentDate.value)
-  
+
   // Check if current time is within open hours
   if (currentTime < openStart || currentTime > openEnd) return false
-  
-  // Check if there's an available segment covering now (use merged segments)
-  if (room.availability && Array.isArray(room.availability) && room.availability.length > 0) {
-    const mergedSegments = mergeAdjacentSegments(room.availability)
-    const isAvailable = mergedSegments.some(seg => {
-      const startTime = parseTime(seg.from || seg.start)
-      const endTime = parseTime(seg.to || seg.end)
-      const inRange = currentTime >= startTime && currentTime < endTime
-      return inRange
-    })
-    return isAvailable
+
+  // Treat a room as available now when it is free at the moment or when the next
+  // available window begins within the next 15 minutes.
+  if (!room.availability || !Array.isArray(room.availability) || room.availability.length === 0) {
+    return false
   }
-  
-  // Fallback: if no availability data, assume available if within open hours
-  return true
+
+  const mergedSegments = mergeAdjacentSegments(room.availability)
+  return mergedSegments.some(seg => {
+    const startTime = parseTime(seg.from || seg.start)
+    const endTime = parseTime(seg.to || seg.end)
+    const isActiveNow = currentTime >= startTime && currentTime < endTime
+    const startsSoon = startTime >= currentTime && startTime <= currentTime + 15
+    return isActiveNow || startsSoon
+  })
 }
 
 const bookRoom = async (room) => {
