@@ -68,7 +68,7 @@
 
       <div v-if="filteredSortedRooms.length === 0" class="no-rooms">No rooms available for this date.</div>
       <div v-for="room in filteredSortedRooms" :key="room.id" class="room-card" :class="{ expanded: expandedRooms.includes(room.id), closing: closingRooms.includes(room.id) }" @click="toggleExpanded(room.id)">
-        <div v-if="isRoomAvailableNow(room)" class="availability-pill">
+        <div v-if="getRoomDerivedData(room.id).isAvailableNow" class="availability-pill">
           <span class="green-dot"></span>Available Now
         </div>
         <h3>{{ room.name }}<span v-if="expandedRooms.includes(room.id)"> - {{ room.zone }} - {{ formatDate(currentDate) }}</span></h3>
@@ -81,9 +81,7 @@
           <div v-if="hoverTime && expandedRooms.includes(room.id)" class="hover-tooltip" :style="{ left: hoverLeft + 'px' }">{{ hoverTime }}</div>
           <div v-if="selectedTimes[room.id] && expandedRooms.includes(room.id)" class="selected-booking" :style="getSelectedBookingStyle(room.id)">{{ duration }} min</div>
           <div
-            v-for="(segment, idx) in room.availability && Array.isArray(room.availability)
-              ? getTimelineSegments(room.availability)
-              : getBookingsForRoom(room.id)"
+            v-for="(segment, idx) in getRoomDerivedData(room.id).timelineSegments"
             :key="segment.id || idx"
             class="booking-segment"
             :style="getBookingStyle(segment)"
@@ -94,40 +92,24 @@
           <label>Start Time: 
             <select v-model="selectedStarts[room.id]" @change="updateSelection(room.id)">
               <option value="">Select Start</option>
-              <option v-for="time in getAvailableStartTimes(room)" :value="time" :key="time">{{ time }}</option>
+              <option v-for="time in getAvailableStartTimes(room)" :value="time" :key="time">{{ formatTimeOption(time) }}</option>
             </select>
           </label>
           <label>End Time: 
             <select v-model="selectedEnds[room.id]" @change="updateSelection(room.id)" :key="`end-${room.id}-${selectedStarts[room.id]}`">
               <option value="">Select End</option>
-              <option v-for="time in getAvailableEndTimes(room, selectedStarts[room.id])" :value="time" :key="time">{{ time }}</option>
+              <option v-for="time in getAvailableEndTimes(room, selectedStarts[room.id])" :value="time" :key="time">{{ formatTimeOption(time) }}</option>
             </select>
           </label>
         </div>
         <div v-if="expandedRooms.includes(room.id) && selectedTimes[room.id]" @click.stop class="booking-container">
-          <form @submit.prevent="bookRoom(room)" class="booking-form">
-            <h4>Book this room from {{ formatTime(minutesToTime(selectedTimes[room.id])) }} to {{ formatTime(minutesToTime(selectedTimes[room.id] + duration)) }}</h4>
-            <input v-model="fname" type="text" placeholder="First Name" required />
-            <input v-model="lname" type="text" placeholder="Last Name" required />
-            <input v-model="email" type="email" placeholder="URI.edu Email" required pattern=".*@uri\.edu$" />
-            <div class="terms-checkbox">
-              <input type="checkbox" :id="`terms-${room.id}`" v-model="termsAccepted[room.id]" required />
-              <label :for="`terms-${room.id}`">I have read and agree to the Terms and Conditions</label>
-            </div>
-            <button type="submit" :disabled="!termsAccepted[room.id]">Book Now</button>
-          </form>
-          <div class="terms-box">
-            <h4>Terms and Conditions</h4>
-            <p><strong>Once you reserve a room, you will receive a confirmation email with a link and a confirmation code. You must check-in to the room upon arrival. If you do not check in within 15 minutes of arriving for your reservation, your reservation will be cancelled.</strong></p>
-            <ol>
-              <li>No curtains nor rolling white boards shall obstruct windows nor block the doors of the study room. No papers should be taped to the walls.</li>
-              <li>No Library materials, including books, should be left in any Group Study Room.</li>
-              <li>The Library is not responsible for loss, theft, or damage of any material left in the room.</li>
-              <li>No electrical appliances are allowed in the Group Study Rooms.</li>
-              <li>The individual to whom the Group Study Room is assigned is responsible for any infraction of the policies or damage to the room. Any damage must be reported to Circulation as soon as possible.</li>
-              <li>The <a href="https://web.uri.edu/library/wp-content/uploads/sites/1549/Patron_Code_of_Conduct_2023.pdf" target="_blank">Library Patron Code of Conduct</a> will apply to all users of the Group Study Rooms.</li>
-            </ol>
-          </div>
+          <BookingForm
+            :key="bookingFormKeys[room.id] || 0"
+            :room-id="room.id"
+            :start-label="formatTime(minutesToTime(selectedTimes[room.id]))"
+            :end-label="formatTime(minutesToTime(selectedTimes[room.id] + duration))"
+            @submit="bookRoom(room, $event)"
+          />
         </div>
       </div>
       </div>
@@ -176,8 +158,9 @@
 </template>
 
 <script setup>
+import BookingForm from './components/BookingForm.vue'
 import libraryLogo from '@/assets/library-logo.png?url'
-import headerImage from '@/assets/URI_11-16_21-3.jpg?url'
+import headerImage from '@/assets/URI_11-16_21-3-.jpg?url'
 import facadeImage from '@/assets/facade.jpg?url'
 import { useTokenManager } from './composables/useAuth'
 
@@ -255,11 +238,17 @@ defineExpose({ getTimelineSegments })
 const libraryName = import.meta.env.VITE_LIBRARY_NAME
 const baseUrl = import.meta.env.VITE_LIBCAL_BASE_URL
 const token = import.meta.env.VITE_LIBCAL_TOKEN
-const locationId = import.meta.env.VITE_LOCATION_ID
-const roomItemIds = import.meta.env.VITE_ROOM_ITEM_IDS ? import.meta.env.VITE_ROOM_ITEM_IDS.split(',').map(id => Number(id.trim())) : []
+const configuredLocationId = import.meta.env.VITE_LOCATION_ID ? Number(import.meta.env.VITE_LOCATION_ID) : null
+const widgetGroupId = import.meta.env.VITE_LIBCAL_GROUP_ID ? Number(import.meta.env.VITE_LIBCAL_GROUP_ID) : null
+const widgetScriptId = import.meta.env.VITE_LIBCAL_WIDGET_ID
+const publicLibcalUrl = (import.meta.env.VITE_LIBCAL_PUBLIC_URL || 'https://uri.libcal.com').replace(/\/$/, '')
+const DEFAULT_LIBCAL_LOCATION_ID = 23510
+const DEFAULT_LIBCAL_GROUP_ID = 49543
 
 // Simple in-memory cache for fetched item metadata to avoid refetching the same ids
 const itemCache = {}
+let roomCatalogCache = null
+let widgetContextCache = null
 
 // Helpers to normalize booking and room shapes and to dedupe bookings
 const normalizeBooking = (b) => {
@@ -371,10 +360,7 @@ const selectedRoomName = ref('All')
 const selectedCapacity = ref('All')
 const hoverTime = ref(null)
 const hoverLeft = ref(0)
-const fname = ref('')
-const lname = ref('')
-const email = ref('')
-const termsAccepted = ref({})
+const bookingFormKeys = ref({})
 const selectedStarts = ref({})
 const selectedEnds = ref({})
 const timeOptions = computed(() => {
@@ -525,8 +511,128 @@ const closeModal = () => {
   showModal.value = false
 }
 
+const fetchText = async (url) => {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status}`)
+  }
+  return response.text()
+}
+
+const discoverWidgetContext = async () => {
+  if (widgetContextCache) return widgetContextCache
+
+  let groupId = Number.isFinite(widgetGroupId) && widgetGroupId > 0 ? widgetGroupId : DEFAULT_LIBCAL_GROUP_ID
+  if (widgetScriptId) {
+    try {
+      const widgetScript = await fetchText(`${publicLibcalUrl}/widgets/${widgetScriptId}`)
+      const groupIdMatch = widgetScript.match(/widget\/equipment\?gid=(\d+)/)
+      if (groupIdMatch) {
+        groupId = Number(groupIdMatch[1])
+      }
+    } catch (scriptError) {
+      console.warn('Failed to resolve LibCal widget group from widget script, using default group id', scriptError)
+    }
+  }
+
+  let locationId = configuredLocationId || DEFAULT_LIBCAL_LOCATION_ID
+  if (!locationId) {
+    const widgetHtml = await fetchText(`${publicLibcalUrl}/widget/equipment?gid=${groupId}`)
+    const locationIdMatch = widgetHtml.match(/id="s-lc-location"[^>]*value="(\d+)"/)
+    if (!locationIdMatch) {
+      throw new Error('Could not determine LibCal location id from widget')
+    }
+    locationId = Number(locationIdMatch[1])
+  }
+
+  widgetContextCache = { groupId, locationId }
+  return widgetContextCache
+}
+
+const parseRoomCatalog = (html) => {
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const cards = Array.from(doc.querySelectorAll('#s-lc-eq-search-results .s-lc-booking-suggestion'))
+
+  return cards.map((card) => {
+    const link = card.querySelector('.s-lc-suggestion-book-now')
+    const href = link?.getAttribute('href') || ''
+    const idMatch = href.match(/\/space\/(\d+)/)
+    const name = card.querySelector('.s-lc-suggestion-heading')?.textContent?.trim() || ''
+    const bookingGroup = card.querySelector('.s-lc-booking-group')?.textContent || ''
+    const bookingParts = bookingGroup
+      .split('|')
+      .map(part => part.trim())
+      .filter(Boolean)
+    const zone = bookingParts[1] || 'Uncategorized'
+    const iconText = card.querySelector('.s-lc-booking-icons')?.textContent || ''
+    const capacityMatch = iconText.match(/(\d+)/)
+    return {
+      id: idMatch ? Number(idMatch[1]) : null,
+      name,
+      zone,
+      capacity: capacityMatch ? Number(capacityMatch[1]) : null,
+    }
+  }).filter(room => Number.isFinite(room.id) && room.id > 0)
+}
+
+const fetchRoomCatalog = async () => {
+  if (roomCatalogCache) return roomCatalogCache
+
+  const { groupId, locationId } = await discoverWidgetContext()
+  const params = new URLSearchParams({
+    m: 's',
+    lid: String(locationId),
+    gid: String(groupId),
+    capacity: '0',
+    zone: '0',
+    search: '',
+  })
+  const html = await fetchText(`${publicLibcalUrl}/widget/equipment?${params.toString()}`)
+  const catalog = parseRoomCatalog(html)
+  if (!catalog.length) {
+    throw new Error('LibCal widget returned no rooms')
+  }
+  roomCatalogCache = catalog
+  return roomCatalogCache
+}
+
 const fetchRooms = async () => {
   // Rooms will be set from bookings
+}
+
+const ZONE_ALIASES = {
+  '12348': 'Lower Level',
+  '12349': 'First Floor',
+  '12350': 'Second Floor',
+  '12351': 'Third Floor',
+  'lower level': 'Lower Level',
+  'llsr': 'Lower Level',
+  '1-first floor': 'First Floor',
+  'first floor': 'First Floor',
+  '2-second floor': 'Second Floor',
+  'second floor': 'Second Floor',
+  '3-third floor': 'Third Floor',
+  'third floor': 'Third Floor',
+}
+
+const normalizeZone = (zoneValue, roomId, roomName = '') => {
+  const override = roomZones[Number(roomId)]
+  if (override) return override
+
+  const rawZone = zoneValue == null ? '' : String(zoneValue).trim()
+  if (rawZone) {
+    if (ZONE_ALIASES[rawZone]) return ZONE_ALIASES[rawZone]
+
+    const normalizedKey = rawZone.toLowerCase().replace(/\s+/g, ' ')
+    if (ZONE_ALIASES[normalizedKey]) return ZONE_ALIASES[normalizedKey]
+
+    if (normalizedKey.includes('lower')) return 'Lower Level'
+    if (normalizedKey.includes('first')) return 'First Floor'
+    if (normalizedKey.includes('second')) return 'Second Floor'
+    if (normalizedKey.includes('third')) return 'Third Floor'
+  }
+
+  return inferZoneFromName(roomName)
 }
 
 const inferZoneFromName = (name) => {
@@ -548,17 +654,20 @@ const inferZoneFromName = (name) => {
 }
 
 const buildRoomsFromBookings = (bookingList) => {
-  // Build a base rooms list from bookings (names/zones) and include env-configured item ids
+  // Build a base rooms list from the public LibCal catalog and any rooms referenced by live bookings.
+  const catalogMap = new Map((roomCatalogCache || []).map(room => [Number(room.id), room]))
   const bookingIds = Array.isArray(bookingList) ? bookingList.map(b => Number(b.eid)) : []
-  const idSet = new Set([ ...(Array.isArray(roomItemIds) ? roomItemIds.map(Number) : []), ...bookingIds ])
+  const catalogIds = Array.from(catalogMap.keys())
+  const idSet = new Set([ ...catalogIds, ...bookingIds ])
   const ids = Array.from(idSet)
   const baseRooms = ids.map(id => {
+    const catalogRoom = catalogMap.get(Number(id))
     const b = (bookingList || []).find(x => Number(x.eid) === Number(id))
     return {
       id: Number(id),
-      name: b ? b.item_name : '',  // Empty string instead of "Room {id}"
-      zone: b ? b.category_name : 'Uncategorized',
-      capacity: null
+      name: catalogRoom?.name || (b ? b.item_name : ''),
+      zone: normalizeZone(catalogRoom?.zone || (b ? b.category_name : ''), id, catalogRoom?.name || (b ? b.item_name : '')),
+      capacity: catalogRoom?.capacity ?? null
     }
   })
   rooms.value = baseRooms
@@ -567,7 +676,14 @@ const buildRoomsFromBookings = (bookingList) => {
 
 const fetchBookings = async () => {
   try {
+    try {
+      await fetchRoomCatalog()
+    } catch (catalogError) {
+      console.warn('Failed to fetch LibCal room catalog:', catalogError)
+    }
+
     const dateStr = currentDate.value.toISOString().split('T')[0]
+    const { locationId } = await discoverWidgetContext()
     console.log('Fetching bookings for', dateStr)
     const bookingsUrl = `${baseUrl}/space/bookings?lid=${locationId}&date=${dateStr}`
     console.log('API Request:', bookingsUrl)
@@ -600,36 +716,28 @@ const fetchBookings = async () => {
     } catch (e) {
       console.warn('Failed to enrich room metadata:', e)
     }
-
-    // Merge availability segments for ids so timelines reflect availability for env items too
-    try {
-      const avail = await fetchAvailabilityForIds(ids, dateStr)
-      for (const seg of avail) {
-        const segEid = Number(seg.eid)
-        const normSeg = normalizeBooking({ ...seg, eid: segEid, status: seg.status || 'Confirmed' })
-        const exists = bookings.value.some(b => b.eid === normSeg.eid && b.fromDate === normSeg.fromDate && b.toDate === normSeg.toDate)
-        if (!exists) bookings.value.push(normSeg)
-      }
-      // Normalize and dedupe after merging availability
-      bookings.value = dedupeBookings(bookings.value.map(normalizeBooking))
-      // Re-run enrichment to pick up any metadata for ids added via availability
-      try {
-        await enrichRoomsWithAPIData(ids)
-      } catch (e) {
-        console.warn('Failed to re-enrich rooms after availability merge:', e)
-      }
-    } catch (e) {
-      // ignore availability merge errors
-    }
   } catch (err) {
     console.error('Fetch error', err)
     error.value = err.message
   }
 }
 
+const bookingsByRoom = computed(() => {
+  const map = {}
+  for (const booking of bookings.value) {
+    const rid = Number(booking.eid)
+    if (!Number.isFinite(rid)) continue
+    if (!map[rid]) map[rid] = []
+    if (String(booking.status).toLowerCase() === 'confirmed') {
+      map[rid].push(booking)
+    }
+  }
+  return map
+})
+
 const getBookingsForRoom = (roomId) => {
   const rid = Number(roomId)
-  return bookings.value.filter(booking => Number(booking.eid) === rid && String(booking.status).toLowerCase() === 'confirmed')
+  return bookingsByRoom.value[rid] || []
 }
 
 const fetchItemDetailsWithAvailability = async (ids, dateStr) => {
@@ -699,14 +807,15 @@ const fetchItemDetailsWithAvailability = async (ids, dateStr) => {
 
 
 const enrichRoomsWithAPIData = async (idsParam = null) => {
-  const envIds = Array.isArray(roomItemIds) && roomItemIds.length ? roomItemIds.map(Number) : []
+  const catalogIds = Array.isArray(roomCatalogCache) && roomCatalogCache.length ? roomCatalogCache.map(room => Number(room.id)) : []
   const bookingIds = bookings.value.map(b => Number(b.eid))
   const existingIds = rooms.value.map(r => Number(r.id))
+  const catalogMap = new Map((roomCatalogCache || []).map(room => [Number(room.id), room]))
   let idSet
   if (Array.isArray(idsParam) && idsParam.length) {
     idSet = new Set(idsParam.map(Number))
   } else {
-    idSet = new Set([ ...envIds, ...bookingIds, ...existingIds ])
+    idSet = new Set([ ...catalogIds, ...bookingIds, ...existingIds ])
   }
   const ids = Array.from(idSet)
 
@@ -719,15 +828,17 @@ const enrichRoomsWithAPIData = async (idsParam = null) => {
   // Build rooms list from itemMap and bookings
   const newRooms = ids.map(id => {
     const numId = Number(id)
+    const catalogRoom = catalogMap.get(numId)
     const item = itemMap[numId]
     const booking = bookings.value.find(b => Number(b.eid) === numId)
-    let name = (item && (item.name || item.item_name)) || (booking && booking.item_name) || `Room ${numId}`
+    let name = (item && (item.name || item.item_name)) || catalogRoom?.name || (booking && booking.item_name) || `Room ${numId}`
     if (!name || String(name).trim() === '') name = `Room ${numId}`
-    const zoneMapping = { "12348": "Lower Level" }
-    let zone = (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || inferZoneFromName(name)
-    zone = zoneMapping[zone] || zone
-    zone = roomZones[numId] || zone
-    const capacity = (item && item.capacity != null) ? Number(item.capacity) : null
+    const zone = normalizeZone(
+      catalogRoom?.zone || (item && (item.zone || item.zone_name || item.location_name)) || (booking && booking.category_name) || '',
+      numId,
+      name,
+    )
+    const capacity = (item && item.capacity != null) ? Number(item.capacity) : (catalogRoom?.capacity ?? null)
     // Extract availability segments from item API response
     let availability = null
     if (item && Array.isArray(item.availability)) {
@@ -755,8 +866,7 @@ const getOpenRange = (date) => {
   return { openStart: 8 * 60, openEnd: 23 * 60 }
 }
 
-const getTotalBookedMinutes = (roomId) => {
-  const roomBookings = getBookingsForRoom(roomId)
+const getTotalBookedMinutes = (roomBookings) => {
   const { openStart, openEnd } = getOpenRange(currentDate.value)
   return roomBookings.reduce((total, booking) => {
     const start = new Date(booking.fromDate)
@@ -770,13 +880,11 @@ const getTotalBookedMinutes = (roomId) => {
   }, 0)
 }
 
-const getAvailabilityPercent = (roomId) => {
+const getAvailabilityPercentForRoom = (room, roomBookings) => {
   const { openStart, openEnd } = getOpenRange(currentDate.value)
   const totalOpen = Math.max(0, openEnd - openStart)
   if (totalOpen === 0) return 0
-  
-  const room = rooms.value.find(r => r.id === roomId)
-  
+
   // If room has availability array (green segments), calculate from that
   if (room && room.availability && Array.isArray(room.availability)) {
     const totalAvailable = room.availability.reduce((total, seg) => {
@@ -791,29 +899,20 @@ const getAvailabilityPercent = (roomId) => {
     }, 0)
     return (totalAvailable / totalOpen) * 100
   }
-  
+
   // Otherwise calculate from bookings (red segments)
-  const booked = getTotalBookedMinutes(roomId)
+  const booked = getTotalBookedMinutes(roomBookings)
   const avail = Math.max(0, totalOpen - booked)
   return (avail / totalOpen) * 100
 }
 
-const sortedRooms = computed(() => {
-  return rooms.value.slice().sort((a, b) => {
-    const availA = getAvailabilityPercent(a.id)
-    const availB = getAvailabilityPercent(b.id)
-    const diff = availB - availA
-    if (Math.abs(diff) > 0.0001) return diff
-  // Use natural numeric-aware comparison for names (e.g., LLSR 2 before LLSR 10)
-  const nameCmp = (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' })
-  if (nameCmp !== 0) return nameCmp
-  return a.id - b.id
-  })
-})
-
 const formatTime = (isoString) => {
   const date = new Date(isoString)
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
+const formatTimeOption = (timeStr) => {
+  return formatTime(minutesToTime(timeToMinutes(timeStr)))
 }
 
 const formatTimeLabel = (position) => {
@@ -837,6 +936,62 @@ const updateHoverTime = (event) => {
 
 const clearHoverTime = () => {
   hoverTime.value = null
+}
+
+const resetBookingForm = (roomId) => {
+  bookingFormKeys.value[roomId] = (bookingFormKeys.value[roomId] || 0) + 1
+}
+
+const isRoomAvailableNowFromData = (room, roomBookings) => {
+  const now = new Date()
+
+  if (currentDate.value.toDateString() !== now.toDateString()) return false
+
+  const currentTime = now.getHours() * 60 + now.getMinutes()
+  const { openStart, openEnd } = getOpenRange(currentDate.value)
+  if (currentTime < openStart || currentTime > openEnd) return false
+
+  if (room.availability && Array.isArray(room.availability) && room.availability.length > 0) {
+    const mergedSegments = mergeAdjacentSegments(room.availability)
+    return mergedSegments.some(seg => {
+      const startTime = parseTime(seg.from || seg.start)
+      const endTime = parseTime(seg.to || seg.end)
+      return currentTime >= startTime && currentTime < endTime
+    })
+  }
+
+  return !roomBookings.some(booking => {
+    const bookingStart = new Date(booking.fromDate || booking.from || booking.start || booking.startDate || booking.start_time || booking.startTime)
+    const bookingEnd = new Date(booking.toDate || booking.to || booking.end || booking.endDate || booking.end_time || booking.endTime)
+    const bookingStartMinutes = bookingStart.getHours() * 60 + bookingStart.getMinutes()
+    const bookingEndMinutes = bookingEnd.getHours() * 60 + bookingEnd.getMinutes()
+    return currentTime >= bookingStartMinutes && currentTime < bookingEndMinutes
+  })
+}
+
+const roomDerivedData = computed(() => {
+  const derived = {}
+  for (const room of rooms.value) {
+    const roomBookings = getBookingsForRoom(room.id)
+    derived[room.id] = {
+      bookings: roomBookings,
+      timelineSegments: room.availability && Array.isArray(room.availability)
+        ? getTimelineSegments(room.availability)
+        : roomBookings,
+      availabilityPercent: getAvailabilityPercentForRoom(room, roomBookings),
+      isAvailableNow: isRoomAvailableNowFromData(room, roomBookings),
+    }
+  }
+  return derived
+})
+
+const getRoomDerivedData = (roomId) => {
+  return roomDerivedData.value[roomId] || {
+    bookings: [],
+    timelineSegments: [],
+    availabilityPercent: 0,
+    isAvailableNow: false,
+  }
 }
 
 const getSelectedBookingStyle = (id) => {
@@ -1001,9 +1156,7 @@ const getMaxDuration = (room) => {
 
 const isPeriodAvailable = (room, start, end) => {
   const booked = room.availability && Array.isArray(room.availability) ? room.availability : getBookingsForRoom(room.id)
-  console.log('Checking availability for room', room.id, 'start', start, 'end', end, 'booked length', booked.length)
   if (booked.length === 0) {
-    console.log('No booked data, assume available')
     return true
   }
   for (const b of booked) {
@@ -1011,13 +1164,10 @@ const isPeriodAvailable = (room, start, end) => {
     const bEndDate = new Date(b.toDate || b.to || b.end || b.endDate || b.end_time || b.endTime)
     const bStart = bStartDate.getHours() * 60 + bStartDate.getMinutes()
     const bEnd = bEndDate.getHours() * 60 + bEndDate.getMinutes()
-    console.log('Available slot:', bStart, bEnd)
     if (bStart < end && bEnd > start) {
-      console.log('Overlaps with available, available')
       return true
     }
   }
-  console.log('No overlap with available, not available')
   return false
 }
 
@@ -1049,7 +1199,6 @@ const isPeriodFullyAvailable = (room, start, end) => {
 }
 
 const selectTime = (id, event) => {
-  console.log('Timeline clicked for room', id)
   const rect = event.currentTarget.getBoundingClientRect()
   const x = event.clientX - rect.left
   const percent = Math.max(0, Math.min(1, x / rect.width))
@@ -1063,42 +1212,10 @@ const selectTime = (id, event) => {
     if (!expandedRooms.value.includes(id)) {
       toggleExpanded(id)
     }
-    console.log('Selected time for room', id, ':', selectedTimes.value[id])
-  } else {
-    console.log('Cannot select time for room', id, ': not available')
   }
 }
 
-const isRoomAvailableNow = (room) => {
-  const now = new Date()
-
-  // Only show "Available Now" if we're viewing today
-  const viewingToday = currentDate.value.toDateString() === now.toDateString()
-  if (!viewingToday) return false
-
-  const currentTime = now.getHours() * 60 + now.getMinutes()
-  const { openStart, openEnd } = getOpenRange(currentDate.value)
-
-  // Check if current time is within open hours
-  if (currentTime < openStart || currentTime > openEnd) return false
-
-  // Treat a room as available now when it is free at the moment or when the next
-  // available window begins within the next 15 minutes.
-  if (!room.availability || !Array.isArray(room.availability) || room.availability.length === 0) {
-    return false
-  }
-
-  const mergedSegments = mergeAdjacentSegments(room.availability)
-  return mergedSegments.some(seg => {
-    const startTime = parseTime(seg.from || seg.start)
-    const endTime = parseTime(seg.to || seg.end)
-    const isActiveNow = currentTime >= startTime && currentTime < endTime
-    const startsSoon = startTime >= currentTime && startTime <= currentTime + 15
-    return isActiveNow || startsSoon
-  })
-}
-
-const bookRoom = async (room) => {
+const bookRoom = async (room, formData) => {
   const startTimeStr = selectedStarts.value[room.id]
   const endTimeStr = selectedEnds.value[room.id]
   
@@ -1133,9 +1250,9 @@ const bookRoom = async (room) => {
   
   const payload = {
     start: formatLocalISO(startDate),
-    fname: fname.value,
-    lname: lname.value,
-    email: email.value,
+    fname: formData.fname,
+    lname: formData.lname,
+    email: formData.email,
     adminbooking: 1,
     bookings: [
       {
@@ -1169,10 +1286,7 @@ const bookRoom = async (room) => {
     if (response.ok) {
       console.log('Booking successful, showing modal...')
       // Clean up form and room state first
-      fname.value = ''
-      lname.value = ''
-      email.value = ''
-      termsAccepted.value[room.id] = false
+      resetBookingForm(room.id)
       delete selectedTimes.value[room.id]
       delete selectedStarts.value[room.id]
       delete selectedEnds.value[room.id]
@@ -1262,14 +1376,14 @@ const filteredSortedRooms = computed(() => {
   
   const sorted = filtered.slice().sort((a, b) => {
     // 1. Available now comes first
-    const aAvailNow = isRoomAvailableNow(a)
-    const bAvailNow = isRoomAvailableNow(b)
+    const aAvailNow = getRoomDerivedData(a.id).isAvailableNow
+    const bAvailNow = getRoomDerivedData(b.id).isAvailableNow
     if (aAvailNow && !bAvailNow) return -1
     if (!aAvailNow && bAvailNow) return 1
     
     // 2. If both (or neither) are available now, sort by availability percentage (highest first)
-    const availA = getAvailabilityPercent(a.id)
-    const availB = getAvailabilityPercent(b.id)
+    const availA = getRoomDerivedData(a.id).availabilityPercent
+    const availB = getRoomDerivedData(b.id).availabilityPercent
     const availDiff = availB - availA
     if (Math.abs(availDiff) > 0.0001) return availDiff
     
@@ -1309,6 +1423,7 @@ const toggleExpanded = (id) => {
       delete selectedTimes.value[id]
       delete selectedStarts.value[id]
       delete selectedEnds.value[id]
+      resetBookingForm(id)
     }, 250)
   } else {
     expandedRooms.value.push(id)
@@ -1666,6 +1781,16 @@ h1 {
 
 .terms-box a:hover {
   color: #001F3F;
+}
+
+@media (max-width: 1024px) {
+  .booking-container {
+    grid-template-columns: 1fr;
+  }
+
+  .terms-box {
+    max-height: none;
+  }
 }
 
 .filters {

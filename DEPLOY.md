@@ -1,109 +1,169 @@
-# Deploy to EC2 (Amazon Linux + Apache)
+# Deploy on Amazon Linux
 
-## Prerequisites
-- Apache running on library.uri.edu with SSL
-- Ports 80/443 in use, app will be at `/reserve`
+This app is a static Vite build that talks directly to LibCal from the browser.
+There is no local Node API server in the current implementation.
 
----
+These instructions assume:
 
-## 1. Install Node.js & PM2
+- Amazon Linux 2023
+- Apache httpd serving the site
+- the app will live at `/var/www/bookinggrid`
+- the public URL will be either the site root or `/reserve`
+
+## 1. Install System Packages
 
 ```bash
-sudo dnf install -y nodejs npm
-sudo npm install -g pm2
+sudo dnf update -y
+sudo dnf install -y git nodejs npm httpd mod_ssl
 ```
 
-## 2. Set Up Project
+Enable and start Apache:
+
+```bash
+sudo systemctl enable httpd
+sudo systemctl start httpd
+```
+
+## 2. Clone the Project
 
 ```bash
 cd /var/www
-sudo git clone https://github.com/your-username/booking-grid2.git
-cd booking-grid2
-sudo chown -R $USER:$USER .
+sudo git clone https://github.com/your-username/bookinggrid.git
+sudo chown -R $USER:$USER /var/www/bookinggrid
+cd /var/www/bookinggrid
+```
+
+## 3. Create Production Environment File
+
+Create `.env.production` in the project root.
+
+Minimum required values:
+
+```dotenv
+VITE_LIBCAL_BASE_URL=https://uri.libcal.com/api/1.1
+VITE_LIBCAL_OAUTH_URL=https://uri.libcal.com/api/1.1/oauth/token
+VITE_LIBCAL_CLIENT_ID=your_client_id
+VITE_LIBCAL_CLIENT_SECRET=your_client_secret
+```
+
+Optional overrides:
+
+```dotenv
+VITE_LOCATION_ID=23510
+VITE_LIBCAL_GROUP_ID=49543
+VITE_LIBCAL_PUBLIC_URL=https://uri.libcal.com
+VITE_LIBCAL_WIDGET_ID=1ebef3548aa2
+VITE_LIBRARY_NAME=Carothers Library
+```
+
+Notes:
+
+- `VITE_LOCATION_ID` and `VITE_LIBCAL_GROUP_ID` are optional because the app now has working defaults for the current LibCal setup.
+- `VITE_ROOM_ITEM_IDS` is no longer needed for room discovery.
+- keep `.env.production` out of source control
+
+## 4. Build the App
+
+```bash
+cd /var/www/bookinggrid
 npm install
+npm run build
 ```
 
-Create `.env.production`:
-```
-VITE_LIBCAL_API_URL=/reserve/api
-VITE_FLOOR_MAP_ID=7592
-VITE_ROOM_ITEM_IDS=70047,70048,70049,70050,70052,70053,70054,70055,70060,70061,70062,70063,70064,70065,70066,70067,70069,70070,70071,70072,70073,70074,70075,70076,70077
+Build output is written to `dist/`.
+
+## 5. Configure Apache
+
+If you want the app at the site root, point Apache at `dist/`.
+
+If you want the app under `/reserve`, add a config like this:
+
+```apache
+Alias /reserve /var/www/bookinggrid/dist
+
+<Directory /var/www/bookinggrid/dist>
+  Options FollowSymLinks
+  AllowOverride None
+  Require all granted
+
+  RewriteEngine On
+  RewriteBase /reserve/
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ /reserve/index.html [L]
+</Directory>
 ```
 
-## 3. Update vite.config.ts
+If you serve at the root instead, use:
 
-```ts
-export default defineConfig({
-  plugins: [react()],
-  base: '/reserve/',
-})
+```apache
+DocumentRoot /var/www/bookinggrid/dist
+
+<Directory /var/www/bookinggrid/dist>
+  Options FollowSymLinks
+  AllowOverride None
+  Require all granted
+
+  RewriteEngine On
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ /index.html [L]
+</Directory>
 ```
 
-## 4. Build
+Place the config in a vhost file such as:
+
+```bash
+sudo nano /etc/httpd/conf.d/bookinggrid.conf
+```
+
+Then validate and reload Apache:
+
+```bash
+sudo apachectl configtest
+sudo systemctl reload httpd
+```
+
+## 6. Set Permissions
+
+```bash
+sudo chown -R apache:apache /var/www/bookinggrid/dist
+sudo find /var/www/bookinggrid/dist -type d -exec chmod 755 {} \;
+sudo find /var/www/bookinggrid/dist -type f -exec chmod 644 {} \;
+```
+
+## 7. Updating the Site
+
+From the project directory:
+
+```bash
+git pull
+npm install
+npm run build
+sudo systemctl reload httpd
+```
+
+## 8. Troubleshooting
+
+Apache status:
+
+```bash
+sudo systemctl status httpd
+```
+
+Apache error log:
+
+```bash
+sudo tail -f /var/log/httpd/error_log
+```
+
+Rebuild the app after env changes:
 
 ```bash
 npm run build
 ```
 
-## 5. Set Up API Proxy
+Important deployment detail:
 
-Create `server/index.js` with LibCal credentials:
-```bash
-npm install express cors
-nano server/index.js
-# Add your LIBCAL_CLIENT_ID and LIBCAL_CLIENT_SECRET
-```
-
-Start with PM2:
-```bash
-pm2 start server/index.js --name "booking-grid-api"
-pm2 save
-pm2 startup
-```
-
-## 6. Configure Apache
-
-Add to SSL VirtualHost (`/etc/httpd/conf.d/ssl.conf`):
-
-```apache
-Alias /reserve /var/www/booking-grid2/dist
-
-<Directory /var/www/booking-grid2/dist>
-    Require all granted
-    RewriteEngine On
-    RewriteBase /reserve/
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteCond %{REQUEST_URI} !^/reserve/api
-    RewriteRule ^ /reserve/index.html [L]
-</Directory>
-
-ProxyPass /reserve/api http://127.0.0.1:3001/reserve/api
-ProxyPassReverse /reserve/api http://127.0.0.1:3001/reserve/api
-```
-
-Restart:
-```bash
-sudo apachectl configtest
-sudo systemctl restart httpd
-```
-
-## 7. Set Permissions
-
-```bash
-sudo chown -R apache:apache /var/www/booking-grid2/dist
-```
-
----
-
-## Commands
-
-| Task | Command |
-|------|---------|
-| View logs | `pm2 logs booking-grid-api` |
-| Restart API | `pm2 restart booking-grid-api` |
-| Restart Apache | `sudo systemctl restart httpd` |
-
----
-
-**Site URL:** https://library.uri.edu/reserve
+- Vite injects `VITE_*` variables at build time.
+- changing `.env.production` on the server does nothing until you rebuild with `npm run build`.
