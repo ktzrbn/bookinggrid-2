@@ -158,7 +158,7 @@
 </template>
 
 <script setup>
-import BookingForm from './components/BookingForm.vue'
+import BookingForm from '@/components/BookingForm.vue'
 import libraryLogo from '@/assets/library-logo.png?url'
 import headerImage from '@/assets/URI_11-16_21-3-.jpg?url'
 import facadeImage from '@/assets/facade.jpg?url'
